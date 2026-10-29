@@ -1,6 +1,6 @@
 # Agent Skills
 
-collection of modular skills for AI coding agents.
+A collection of modular skills for AI coding agents.
 
 ---
 
@@ -16,9 +16,10 @@ collection of modular skills for AI coding agents.
 
 ## 📦 Available Skills
 
-| Skill | Version | Compatibility | Description |
-|---|---|---|---|
-| [`license-audit`](skills/license-audit/SKILL.md) | `0.1.0` | Offline-first | Audits third-party dependency and asset licenses, checks compatibility against project distribution models, identifies copyleft/IP risks, and generates actionable remediation reports. |
+| Skill | Version | Compatibility | Description | Docs |
+|---|---|---|---|---|
+| [`license-audit`](skills/license-audit/SKILL.md) | `0.1.0` | Offline-first | Audits third-party dependency and asset licenses, checks compatibility against project distribution models, identifies copyleft/IP risks, and generates actionable remediation reports. | [Guide](skills/license-audit/README.md) |
+| [`code-to-business-flow`](skills/code-to-business-flow/SKILL.md) | `0.1.0` | Python 3.8+ (stdlib) | Reverse-engineers application source code into business flows, user journeys, status lifecycles, and business rules with evidence tags and Mermaid diagrams. | [Guide](skills/code-to-business-flow/README.md) |
 
 ---
 
@@ -29,7 +30,20 @@ agent-skills/
 ├── LICENSE
 ├── README.md
 └── skills/
+    ├── code-to-business-flow/
+    │   ├── README.md
+    │   ├── SKILL.md
+    │   ├── assets/
+    │   │   ├── report-template.html
+    │   │   └── report-template.md
+    │   ├── references/
+    │   │   └── discovery-signals.md
+    │   └── scripts/
+    │       ├── render_report.py
+    │       ├── scan_repo.py
+    │       └── validate_report.py
     └── license-audit/
+        ├── README.md
         └── SKILL.md
 ```
 
@@ -45,6 +59,7 @@ npx skills add sepsarip/agent-skills
 
 # Or install a specific skill
 npx skills add sepsarip/agent-skills --skill license-audit
+npx skills add sepsarip/agent-skills --skill code-to-business-flow
 ```
 
 ---
@@ -53,9 +68,15 @@ npx skills add sepsarip/agent-skills --skill license-audit
 
 Once installed, your agent will discover the skill automatically based on your prompt:
 
+**License Compliance Audit:**
 > *"Audit the third-party licenses in this repository and prepare a compliance report."*
+>
+> *(Activates `license-audit`)*
 
-The agent will activate the corresponding skill (`license-audit`) and guide you through the audit process.
+**Business Flow Reverse-Engineering:**
+> *"Explain the business flow of this repository and generate a visual journey report."*
+>
+> *(Activates `code-to-business-flow`)*
 
 ---
 
@@ -66,6 +87,7 @@ Each skill resides in its own directory under `skills/<skill-name>/`:
 ```text
 skills/<skill-name>/
 ├── SKILL.md          # Core skill definition and workflow (required)
+├── README.md         # Human-readable guide and usage documentation (recommended)
 ├── scripts/          # Helper scripts executable by the agent (optional)
 └── references/       # Additional documentation or templates (optional)
 ```
