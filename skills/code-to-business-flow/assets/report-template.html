@@ -67,20 +67,34 @@ td:first-child{white-space:nowrap;font-weight:600}
 .fact{color:var(--fact-fg);background:var(--fact-bg)}
 .inferred{color:var(--inf-fg);background:var(--inf-bg)}
 .unknown{color:var(--unk-fg);background:var(--unk-bg)}
-figure.diagram{margin:1.1rem 0;padding:1rem;border:1px solid var(--line);border-radius:4px;background:var(--surface);overflow-x:auto}
+figure.diagram{position:relative;margin:1.1rem 0;border:1px solid var(--line);border-radius:6px;background:var(--surface);overflow:hidden}
 section.flow figure.diagram{background:var(--bg)}
-figure.diagram pre.mermaid{background:none;padding:0;margin:0;text-align:center;font-family:var(--sans);color:transparent;min-height:3rem}
-figure.diagram svg{max-width:100%;height:auto}
+figure.diagram pre.mermaid{background:none;padding:1rem;margin:0;text-align:center;font-family:var(--sans);color:transparent;min-height:3rem}
+.diagram-viewport{position:relative;width:100%;overflow:hidden;padding:1.5rem 1rem 1rem;cursor:grab;user-select:none;-webkit-user-select:none;touch-action:none}
+.diagram-viewport.is-dragging{cursor:grabbing}
+.diagram-viewport.is-dragging .diagram-stage{transition:none;pointer-events:none}
+.diagram-stage{transform-origin:0 0;display:flex;justify-content:center;align-items:center;width:100%;will-change:transform;transition:transform .05s ease-out}
+figure.diagram svg{max-width:100%;height:auto;display:block;margin:0 auto}
+.diagram-toolbar{position:absolute;top:.5rem;right:.5rem;display:flex;align-items:center;gap:.25rem;background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:.2rem .35rem;z-index:5;box-shadow:0 1px 4px rgba(0,0,0,.08);opacity:.85;transition:opacity .2s}
+figure.diagram:hover .diagram-toolbar{opacity:1}
+.diagram-btn{appearance:none;background:none;border:0;color:var(--muted);padding:.25rem;border-radius:3px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1}
+.diagram-btn:hover{color:var(--ink);background:var(--code-bg)}
+.diagram-btn:focus-visible{outline:2px solid var(--accent)}
+.diagram-scale{font-size:.72rem;font-family:var(--mono);color:var(--muted);padding:0 .3rem;min-width:2.8rem;text-align:center;user-select:none}
 body.no-mermaid figure.diagram pre.mermaid{color:var(--ink);text-align:left;font:.85rem/1.5 var(--mono);background:var(--code-bg);padding:1rem;white-space:pre}
-body.no-mermaid figure.diagram::before{content:attr(data-fallback);display:block;font-size:.85rem;color:var(--muted);margin-bottom:.5rem}
+body.no-mermaid figure.diagram::before{content:attr(data-fallback);display:block;font-size:.85rem;color:var(--muted);margin-bottom:.5rem;padding:0 1rem}
+body.no-mermaid .diagram-toolbar{display:none!important}
+body.no-mermaid .diagram-viewport{cursor:default}
 blockquote{margin:1rem 0;padding:.25rem 1rem;border-left:3px solid var(--accent);color:var(--muted)}
 hr{border:0;border-top:1px solid var(--line);margin:1.5rem 0}
 @media (max-width:900px){.panel,.panel.no-toc{grid-template-columns:minmax(0,1fr)}.toc{position:static;border-left:0;padding-left:0;order:-1}.toc ol{display:flex;flex-wrap:wrap;gap:.25rem 1rem}.toc li+li{margin-top:0}}
 @media print{
-  header nav,.toc{display:none}
+  header nav,.toc,.diagram-toolbar{display:none!important}
   .panel,.panel:not(.active){position:static;visibility:visible;width:auto;display:block;pointer-events:auto}
   body{background:#fff}
   section.flow{break-inside:avoid-page}
+  .diagram-viewport{cursor:default!important;overflow:visible!important;padding:0!important}
+  .diagram-stage{transform:none!important}
 }
 </style>
 <noscript><style>.panel:not(.active){position:static;visibility:visible;width:auto;display:block}</style></noscript>
@@ -120,6 +134,108 @@ __PANELS__
   var start=0,h=decodeURIComponent(location.hash.slice(1)),target=h?document.getElementById(h):null;
   if(target){panels.forEach(function(p,i){if(p===target||p.contains(target)){start=i;}});}
   select(start);
+  function initPanZoom(){
+    var figures=document.querySelectorAll('figure.diagram');
+    figures.forEach(function(fig){
+      var svg=fig.querySelector('svg');
+      if(!svg||fig.querySelector('.diagram-toolbar'))return;
+      var toolbar=document.createElement('div');
+      toolbar.className='diagram-toolbar';
+      toolbar.setAttribute('aria-label','Diagram controls');
+      toolbar.innerHTML=
+        '<button type="button" class="diagram-btn" data-action="zoom-in" title="Zoom in (+)" aria-label="Zoom in">'+
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>'+
+        '</button>'+
+        '<button type="button" class="diagram-btn" data-action="zoom-out" title="Zoom out (-)" aria-label="Zoom out">'+
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>'+
+        '</button>'+
+        '<button type="button" class="diagram-btn" data-action="reset" title="Reset view (Double-click diagram)" aria-label="Reset view">'+
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>'+
+        '</button>'+
+        '<span class="diagram-scale" title="Current zoom">100%</span>';
+
+      var viewport=document.createElement('div');
+      viewport.className='diagram-viewport';
+      var stage=document.createElement('div');
+      stage.className='diagram-stage';
+
+      stage.appendChild(svg);
+      viewport.appendChild(stage);
+      fig.innerHTML='';
+      fig.appendChild(toolbar);
+      fig.appendChild(viewport);
+
+      var scale=1.0,translateX=0,translateY=0;
+      var isDragging=false,startX=0,startY=0,startTx=0,startTy=0;
+      var scaleEl=toolbar.querySelector('.diagram-scale');
+
+      function update(){
+        stage.style.transform='translate('+translateX+'px, '+translateY+'px) scale('+scale+')';
+        if(scaleEl){scaleEl.textContent=Math.round(scale*100)+'%';}
+      }
+
+      function zoom(factor,clientX,clientY){
+        var rect=viewport.getBoundingClientRect();
+        var cx=(clientX!==undefined?clientX:rect.left+rect.width/2)-rect.left;
+        var cy=(clientY!==undefined?clientY:rect.top+rect.height/2)-rect.top;
+        var newScale=Math.min(Math.max(scale*factor,0.2),5.0);
+        var ratio=newScale/scale;
+        translateX=cx-(cx-translateX)*ratio;
+        translateY=cy-(cy-translateY)*ratio;
+        scale=newScale;
+        update();
+      }
+
+      function reset(){
+        scale=1.0;
+        translateX=0;
+        translateY=0;
+        update();
+      }
+
+      toolbar.querySelector('[data-action="zoom-in"]').addEventListener('click',function(e){e.stopPropagation();zoom(1.25);});
+      toolbar.querySelector('[data-action="zoom-out"]').addEventListener('click',function(e){e.stopPropagation();zoom(0.8);});
+      toolbar.querySelector('[data-action="reset"]').addEventListener('click',function(e){e.stopPropagation();reset();});
+
+      viewport.addEventListener('wheel',function(e){
+        e.preventDefault();
+        var factor=e.deltaY<0?1.15:1/1.15;
+        zoom(factor,e.clientX,e.clientY);
+      },{passive:false});
+
+      viewport.addEventListener('pointerdown',function(e){
+        if(e.button!==0)return;
+        isDragging=true;
+        startX=e.clientX;
+        startY=e.clientY;
+        startTx=translateX;
+        startTy=translateY;
+        viewport.classList.add('is-dragging');
+        try{viewport.setPointerCapture(e.pointerId);}catch(_){}
+      });
+
+      viewport.addEventListener('pointermove',function(e){
+        if(!isDragging)return;
+        translateX=startTx+(e.clientX-startX);
+        translateY=startTy+(e.clientY-startY);
+        update();
+      });
+
+      function stopDrag(e){
+        if(!isDragging)return;
+        isDragging=false;
+        viewport.classList.remove('is-dragging');
+        try{viewport.releasePointerCapture(e.pointerId);}catch(_){}
+      }
+
+      viewport.addEventListener('pointerup',stopDrag);
+      viewport.addEventListener('pointercancel',stopDrag);
+      viewport.addEventListener('dblclick',function(e){
+        e.preventDefault();
+        reset();
+      });
+    });
+  }
   var s=document.createElement('script');
   s.src='__MERMAID_URL__';
   s.onerror=function(){document.body.classList.add('no-mermaid');};
@@ -128,7 +244,12 @@ __PANELS__
     mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:dark?
       {fontFamily:'system-ui,sans-serif',primaryColor:'#222C52',primaryTextColor:'#E6EDF2',primaryBorderColor:'#93A5FF',lineColor:'#9FAEBA',secondaryColor:'#173A2A',tertiaryColor:'#17212A'}:
       {fontFamily:'system-ui,sans-serif',primaryColor:'#E8ECFC',primaryTextColor:'#16222B',primaryBorderColor:'#2F4BD8',lineColor:'#52626E',secondaryColor:'#DCF2E5',tertiaryColor:'#FFFFFF'}});
-    mermaid.run({querySelector:'pre.mermaid',suppressErrors:true}).catch(function(){document.body.classList.add('no-mermaid');});
+    var runRes=mermaid.run({querySelector:'pre.mermaid',suppressErrors:true});
+    if(runRes&&typeof runRes.then==='function'){
+      runRes.then(initPanZoom).catch(function(){document.body.classList.add('no-mermaid');});
+    }else{
+      initPanZoom();
+    }
   };
   document.head.appendChild(s);
 })();

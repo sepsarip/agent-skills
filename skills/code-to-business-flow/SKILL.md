@@ -1,7 +1,7 @@
 ---
 name: code-to-business-flow
-description: Use this skill when the user wants to understand what an application or website actually does by reading its source code, then document it as business flows, user journeys, status lifecycles, actors and business rules, with diagrams. Triggers include "explain the business flow of this repo", "explain how this application works end-to-end", reverse-engineering requirements from code, onboarding onto an unfamiliar codebase from a business angle, preparing documentation for stakeholders or a business analyst, or finding out how a feature works end to end, even if the user never says "business flow". Produces a layered Markdown report (short summary first, then per-flow detail) plus a rendered HTML version. Do not use for code review, bug fixing, API reference generation, or building new features.
-compatibility: Bundled scripts need Python 3.8+ (standard library only). The HTML report loads Mermaid from a CDN, so diagrams need internet when the file is opened.
+description: Use this skill when the user wants to understand what an application or website actually does by reading its source code, then document it as business flows, user journeys, status lifecycles, actors and business rules, with diagrams. Triggers include "explain the business flow of this repo", "explain how this application works end-to-end", reverse-engineering requirements from code, onboarding onto an unfamiliar codebase from a business angle, preparing documentation for stakeholders or a business analyst, or finding out how a feature works end to end, even if the user never says "business flow". Produces a layered Markdown report (short summary first, then per-flow detail), an interactive HTML dashboard with zoomable diagrams, or both. Do not use for code review, bug fixing, API reference generation, or building new features.
+compatibility: Bundled scripts require Python 3.8+ (standard library only, zero pip dependencies). Run in a sandbox whenever available to avoid polluting the host machine. The HTML report loads Mermaid from a CDN, so diagrams need internet when the file is opened.
 metadata:
   version: "0.1"
 ---
@@ -12,24 +12,32 @@ Turn a codebase into a report a non-technical reader can follow and a developer 
 
 Code shows **what** happens, rarely **why**. An agent that forgets this writes fluent, confident business rules that are guesses. Every statement in the report therefore carries a tag saying how it is known (see Evidence rules). That is the core of this skill; the diagrams and layout serve it.
 
+> [!NOTE]
+> **Sandbox Execution**: Bundled scripts (`scan_repo.py`, `validate_report.py`, `render_report.py`) use only the Python standard library with zero `pip` dependencies. Run all analyses and script invocations inside a secure sandbox environment whenever available (`BypassSandbox: false` or container) to avoid polluting or modifying the host machine.
+
 ## Workflow
 
 Copy this checklist and tick it off:
 
 ```
-- [ ] 1. Scope
+- [ ] 1. Scope & choose output format
 - [ ] 2. Map the repo (scripts/scan_repo.py)
 - [ ] 3. Choose flows and state the plan
 - [ ] 4. Trace each flow end to end
 - [ ] 5. Write report.md from assets/report-template.md
 - [ ] 6. Validate (scripts/validate_report.py) and fix until it exits 0
-- [ ] 7. Render (scripts/render_report.py)
+- [ ] 7. Render (scripts/render_report.py, if HTML or Both requested)
 - [ ] 8. Hand over: paths, summary, open questions
 ```
 
 ### 1. Scope
 
 Decide the root directory and whether the user wants the whole app or one feature. In a monorepo, pick the app folder, not the repo root. Write the report in the language the user wrote their request in, not the language of the code. Ask only when the target is genuinely ambiguous (which app in a monorepo, which feature); otherwise state your assumption in the report's coverage section and go on.
+
+**Output format selection**: Confirm or ask the user upfront what output format is preferred:
+- **Markdown report (`report.md`)**: Best for repository documentation, PR reviews, and version control.
+- **Interactive HTML report (`report.html`)**: Best for stakeholder walkthroughs, featuring tabs, colour badges, and zoomable/pannable diagrams.
+- **Both (default if unstated)**: Generates both documents.
 
 ### 2. Map the repo
 
@@ -51,7 +59,9 @@ Read `references/discovery-signals.md` before tracing. It lists where rules hide
 
 ### 5. Write the report
 
-Start from `assets/report-template.md`. Keep its three-layer shape (headings are translated to the report language, order is fixed because the renderer builds tabs from level-2 headings):
+Start from `assets/report-template.md`. Always write `report.md` first (even if the user only requested HTML output) because generating concise Markdown consumes significantly fewer LLM tokens than raw HTML, and it serves as the verified source for `validate_report.py`. If only HTML was requested, `report.md` may be retained as the source or deleted afterwards per user preference.
+
+Keep its three-layer shape (headings are translated to the report language, order is fixed because the renderer builds tabs from level-2 headings):
 
 1. **Summary** for a reader with two minutes: what the app is for, who uses it, one journey diagram, the flows in one line each.
 2. **Flows**, one level-3 section per flow: steps, diagram, status lifecycle, business rules table, failure paths.
@@ -67,15 +77,19 @@ It checks that every `path:line` reference exists, every FACT rule has one, ever
 
 ### 7. Render
 
+*Skip this step if the user requested Markdown only.*
+
+If HTML or Both was requested:
+
 ```bash
 python3 scripts/render_report.py report.md --output report.html
 ```
 
-Produces one self-contained HTML file (tabs per layer, tagged badges, diagrams). If the output folder is not specified by the user, put both files in `docs/business-flow/` of the analysed repo and say so.
+Produces one self-contained HTML file (tabs per layer, tagged badges, and pan/zoom enabled diagrams). If the output folder is not specified by the user, put the file(s) in `docs/business-flow/` of the analysed repo and say so.
 
 ### 8. Hand over
 
-Reply with the two file paths, a five-line summary, and the most important `UNKNOWN` items as questions for the human who knows the business. Do not claim the flows are verified; say they are traced from code and which parts need confirmation.
+Reply with the generated file path(s) (`report.md`, `report.html`, or both depending on the chosen format), a five-line summary, and the most important `UNKNOWN` items as questions for the human who knows the business. Do not claim the flows are verified; say they are traced from code and which parts need confirmation.
 
 ## Evidence rules
 
