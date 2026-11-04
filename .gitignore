@@ -20,9 +20,11 @@ venv*/
 env/
 env*/
 
-# Playwright & Browser MCP Artifacts
+# Playwright, Browser MCP & Demo Recordings
 .playwright-mcp/
 ms-playwright/
+recordings/
+recordings/.temp/
 
 # Testing & Coverage
 .pytest_cache/

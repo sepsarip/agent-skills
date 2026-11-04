@@ -20,6 +20,7 @@ A collection of modular skills for AI coding agents.
 |---|---|---|---|---|
 | [`license-audit`](skills/license-audit/SKILL.md) | `0.1.0` | Offline-first | Audits third-party dependency and asset licenses, checks compatibility against project distribution models, identifies copyleft/IP risks, and generates actionable remediation reports. | [Guide](skills/license-audit/README.md) |
 | [`code-to-business-flow`](skills/code-to-business-flow/SKILL.md) | `0.1.0` | Python 3.8+ (stdlib) | Reverse-engineers application source code into business flows, user journeys, status lifecycles, and business rules with evidence tags and Mermaid diagrams. | [Guide](skills/code-to-business-flow/README.md) |
+| [`record-web-demo`](skills/record-web-demo/SKILL.md) | `0.1.0` | Node.js 18+, Playwright, ffmpeg | Automates recording web application UI workflows and product demos into polished MP4, WebM, or GIF formats with dynamic vector cursors and humanized pacing. | [Guide](skills/record-web-demo/README.md) |
 | [`user-manual-generator`](skills/user-manual-generator/SKILL.md) | `0.1.0` | Python 3.9+ | Generates publication-ready end-user manuals (.md, .docx, .pdf) with clickable Table of Contents, standard A4 layout, high-DPI screenshots, collision-free arrows, and feature gap analysis. | [Guide](skills/user-manual-generator/README.md) |
 
 ---
@@ -44,6 +45,9 @@ agent-skills/
     │       ├── scan_repo.py
     │       └── validate_report.py
     ├── license-audit/
+    │   ├── README.md
+    │   └── SKILL.md
+    ├── record-web-demo/
     │   ├── README.md
     │   └── SKILL.md
     └── user-manual-generator/
@@ -77,6 +81,7 @@ npx skills add sepsarip/agent-skills
 # Or install a specific skill
 npx skills add sepsarip/agent-skills --skill license-audit
 npx skills add sepsarip/agent-skills --skill code-to-business-flow
+npx skills add sepsarip/agent-skills --skill record-web-demo
 npx skills add sepsarip/agent-skills --skill user-manual-generator
 ```
 
@@ -95,6 +100,11 @@ Once installed, your agent will discover the skill automatically based on your p
 > *"Explain the business flow of this repository and generate a visual journey report."*
 >
 > *(Activates `code-to-business-flow`)*
+
+**Web Demo Video & GIF Recording:**
+> *"Record a 720p walkthrough demo of our web app showing user login and dashboard navigation, and export as an optimized MP4 and GIF."*
+>
+> *(Activates `record-web-demo`)*
 
 **User Manual Book Generation:**
 > *"Generate a comprehensive end-user manual book for this application with annotated screenshots and step-by-step guides."*
