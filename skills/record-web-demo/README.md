@@ -14,9 +14,12 @@ The **`record-web-demo`** skill gives AI coding agents a deterministic, polished
 
 ## ✨ Key Features
 
-- **Dynamic Vector Cursors**: Injects MIT-licensed Tabler vector cursors into the browser DOM that dynamically switch between standard arrow, interactive pointer hand, and text I-beam with calibrated hotspots and click feedback (`scale(0.85)`).
+- **Dynamic Vector Cursors**: Injects MIT-licensed Tabler vector cursors into the browser DOM (`document.documentElement`) that dynamically switch between standard arrow, interactive pointer hand, and text I-beam with calibrated hotspots and click feedback (`scale(0.85)`).
 - **Dual-Tone High Contrast**: Cursors feature white fills with dark borders and drop shadows, ensuring clear visibility across light, dark, and mixed application themes.
-- **Humanized Interaction Pacing**: Simulates realistic human interactions using stepped cursor curves (`steps: 25`), character-by-character typing delays (`90ms`), and settle pauses (`800ms`) after state transitions or modals.
+- **Speed Ramping (Default: Active)**: Automatically accelerates long text typing (`1.5x–2x` via `42ms` character delay) and compresses slow loading spinners/network waits via FFmpeg `setpts` filters while keeping key UI transitions (modals, theme changes) at normal `1x` speed.
+- **Auto-Zoom & Pan on Hotspots (Opt-in, Default: Off)**: Smoothly zooms (`1.65x`) and pans the viewport toward compact inputs, password fields, or theme toggles so small controls remain legible on mobile screens, then zooms back out (`1x`) for full-layout navigation without exposing blank margins or scaling the cursor/badges.
+- **Step Callout / Floating Badges (Opt-in, Default: Off)**: Renders semi-transparent pill badges (`backdrop-filter: blur(8px)`) at the bottom of the screen (e.g., *"Langkah 1: Masuk dengan Akun Admin"*) to provide clear visual storytelling without requiring voiceover audio.
+- **Humanized Interaction Pacing**: Simulates realistic human interactions using stepped cursor curves (`steps: 25`), adaptive typing delays (`85ms` short / `42ms` long), and settle pauses (`800ms`) after state transitions or modals.
 - **Isolated Atomic Staging**: Colocates transient runner scripts and raw video buffers inside `recordings/.temp/`, ensuring a clean workspace that purges completely in a single `rm -rf` command.
 - **Multi-Format Export Pipeline**:
   - **Native WebM**: Direct Playwright video output without transcoding overhead.
@@ -54,31 +57,47 @@ Checks necessary runtime dependencies:
 - FFmpeg availability for transcoding (`ffmpeg -version`)
 
 ### Step 2: Define Scenario & Parameters
-Establishes recording parameters before generating code:
+Establishes recording parameters and confirms optional features before generating code:
 - **Target URL**: Dev server (e.g. `http://localhost:3000`) or production deployment.
 - **Dimensions**: 1280x720 (720p 16:9 standard for READMEs) or 1920x1080 (1080p).
 - **Target Format**: WebM, MP4, or GIF.
+- **Visual & Timing Enhancements**:
+  - **Speed Ramping** (**Default: Active**): Adaptive typing (`1.5x–2x` for long text) and FFmpeg timeline acceleration for slow loading spinners.
+  - **Auto-Zoom & Pan** (**Default: Off** — ask user whether to enable): Smooth camera zoom onto compact inputs and toggles.
+  - **Step Callout / Floating Badges** (**Default: Off** — ask user whether to enable): Visual narration pills for silent demos.
 - **Output Destination**: Standardized under `recordings/<scenario-name>.<ext>` (avoids generic `demo.mp4` collisions).
 
-### Step 3: Script Generation with Dynamic Vector Cursors
-Generates a self-contained runner script directly inside `recordings/.temp/runner.mjs`. Injects adaptive SVG cursors:
+### Step 3: Script Generation with Dynamic Vector Cursors & Helpers
+Generates a self-contained runner script directly inside `recordings/.temp/runner.mjs`. Injects adaptive SVG cursors and helpers:
 - **Default Arrow**: Calibrated at hotspot `(-4px, -4px)`.
 - **Pointer Hand**: Automatically triggered when hovering over `button`, `a`, `[role="button"]`, or elements with `cursor: pointer`.
 - **Text I-Beam**: Automatically triggered over inputs, textareas, and contenteditable elements.
 - **Click Feedback**: Scales cursor to `0.85` on `mousedown` and restores to `1.0` on `mouseup`.
+- **Speed Ramping Helpers**: `humanType()` (accelerates inputs > 15 chars to `42ms`) and `withSpeedRamp()` (tracks slow loading intervals for FFmpeg acceleration).
+- **Optional Camera & Callout Helpers**: `zoomTo()` / `resetZoom()` (clamped viewport pan/zoom on `document.body`) and `showStep()` / `hideStep()` (floating badge mounted on `document.documentElement`).
 
 ### Step 4: Execute Recording
-Runs the headless script via Node.js, capturing the raw WebM buffer:
+Runs the headless script via Node.js, capturing the raw WebM buffer and any `FAST_SEGMENTS` metadata:
 ```bash
 node recordings/.temp/runner.mjs
 ```
 
-### Step 5: Post-Processing & Transcoding
-Converts the raw WebM buffer to the requested target format:
+### Step 5: Post-Processing, Speed Ramping & Transcoding
+Converts the raw WebM buffer to the requested target format (and applies `trim` + `setpts` speed ramping if `FAST_SEGMENTS` were recorded):
 
 - **Web-Optimized MP4**:
   ```bash
   ffmpeg -y -i recordings/.temp/<raw>.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
+  ```
+
+- **Timeline Speed Ramping MP4 (1.75x on loading segments)**:
+  ```bash
+  ffmpeg -y -i recordings/.temp/<raw>.webm -filter_complex \
+    "[0:v]trim=0:3.0,setpts=PTS-STARTPTS[v0]; \
+     [0:v]trim=3.0:6.5,setpts=(PTS-STARTPTS)/1.75[v1]; \
+     [0:v]trim=6.5,setpts=PTS-STARTPTS[v2]; \
+     [v0][v1][v2]concat=n=3:v=1:a=0[outv]" \
+    -map "[outv]" -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
   ```
 
 - **Optimized Two-Pass GIF**:
@@ -109,6 +128,7 @@ Verifies output file size and delivers the relative/absolute path to the user.
 ## 💡 Best Practices & Gotchas
 
 - **Video Buffer Flush**: Playwright writes video frames asynchronously. Always await `context.close()` and `browser.close()` before moving or converting video files, otherwise files will be 0 bytes.
+- **Overlay Mounting during Auto-Zoom**: Append `#demo-cursor` and `#demo-step-badge` to `document.documentElement` (`<html>`) while applying CSS camera zoom (`transform: translate(...) scale(...)`) to `document.body`. This prevents the cursor and floating badge from scaling up or clipping outside the viewport, and wait `500ms` for the zoom transition before reading `boundingBox()`.
 - **Viewport Synchronization**: Always match `viewport` and `recordVideo.size` in `browser.newContext()` to identical dimensions (e.g. `1280x720`) to prevent black borders or distortion.
 - **Dynamic Selectors vs. Hardcoded Sleep**: Use `waitForSelector` or `waitForLoadState('networkidle')` before initiating interactions rather than arbitrary short sleeps.
 - **Zero Directory Pollution**: Never place temporary scripts in root or create separate `scripts/` or `tmp/` folders in the target project. Keep transient assets confined to `recordings/.temp/`.

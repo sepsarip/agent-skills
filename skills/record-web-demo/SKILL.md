@@ -4,11 +4,11 @@ description: Record polished, humanized walkthrough demo videos of web applicati
 license: MIT
 compatibility: Requires Node.js 18+, Playwright (npx playwright), Chromium browser binary, and optional ffmpeg (for MP4/GIF transcoding).
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 # Record Web Demo
 
-Automate the recording of web application UI workflows and product demos into clean MP4, WebM, or GIF formats using Playwright with humanized pacing, standardized output locations, atomic temporary directory cleanup, and dynamic cursor simulation (pointer, hand, I-beam).
+Automate the recording of web application UI workflows and product demos into clean MP4, WebM, or GIF formats using Playwright with humanized pacing, default speed ramping, optional camera auto-zoom/pan, optional visual step callout badges, standardized output locations, atomic temporary directory cleanup, and dynamic cursor simulation (pointer, hand, I-beam).
 
 ## When to Use
 
@@ -34,7 +34,7 @@ Verify runtime tools and dependencies before running recordings:
    npx -y playwright install chromium
    ```
 
-3. Check ffmpeg availability (required for WebM to MP4 or optimized GIF conversion):
+3. Check ffmpeg availability (required for WebM to MP4, optimized GIF conversion, or post-process speed ramping):
    ```bash
    ffmpeg -version
    ```
@@ -42,11 +42,15 @@ Verify runtime tools and dependencies before running recordings:
 
 ### Step 2: Define Scenario, Parameters, and Output Path
 
-Determine demo parameters and output destination:
+Determine demo parameters, confirm optional visual enhancements with the user, and set the output destination:
 
 - Target URL: Local development server (e.g., `http://localhost:3000`) or remote URL.
 - Resolution: Standardize on 1280x720 (720p 16:9 default for READMEs) or 1920x1080 (1080p).
 - Target format: WebM (native Playwright), MP4 (universal web playback), or GIF (GitHub README).
+- Visual & Timing Features:
+  - **Speed Ramping (Dynamic Duration)** — **Default: Active (ON)**. Automatically accelerates long text typing (`1.5x–2x` faster) and compresses slow loading spinners/network waits while keeping key visual moments (modal appearances, theme switches, state confirmations) at normal `1x` speed so the demo never feels sluggish.
+  - **Auto-Zoom & Pan (Hotspot Focus)** — **Default: Inactive (OFF)**. Before generating the script, **ask the user** whether they want to enable smooth camera zoom-in (`1.5x–1.8x`) on small inputs, password fields, or compact toggles (especially helpful for 1080p recordings viewed on mobile screens) and zoom-out when viewing full layouts.
+  - **Step Callout / Floating Badges (Visual Narration)** — **Default: Inactive (OFF)**. Before generating the script, **ask the user** whether they want to display semi-transparent floating step badges in the corner of the screen (e.g., `"Langkah 1: Masuk dengan Akun Admin"`, `"Langkah 2: Ganti Tema ke Dark Mode"`) to provide clear storytelling in silent/muted videos.
 - Output File Path:
   - Default: `recordings/<scenario-name>.<ext>` (e.g. `recordings/login-flow.mp4` or `recordings/dashboard-navigation.gif`). Never use generic `demo.mp4` to avoid accidental overwrites.
   - Custom override: If the user specifies a custom path (e.g. `docs/assets/hero.gif`), save directly there.
@@ -68,22 +72,30 @@ Key implementation patterns for `recordings/.temp/runner.mjs`:
    const tempDir = './recordings/.temp';
    fs.mkdirSync(tempDir, { recursive: true });
 
+   const VIEWPORT = { width: 1280, height: 720 };
    const browser = await chromium.launch({ headless: true });
    const context = await browser.newContext({
-     viewport: { width: 1280, height: 720 },
+     viewport: VIEWPORT,
      recordVideo: {
        dir: tempDir,
-       size: { width: 1280, height: 720 }
+       size: VIEWPORT
      }
    });
    const page = await context.newPage();
+   const recordingStartMs = Date.now();
+   const fastSegments = []; // Stores { start: sec, end: sec, speed: 1.75 } for FFmpeg speed ramping
    ```
 
-2. Dynamic Tabler Vector Cursors (MIT Licensed):
-   Inject responsive vector cursors that automatically adapt between default arrow, pointer hand, and text I-beam with calibrated hotspots and dual-tone high contrast for light/dark themes:
+2. Dynamic Tabler Vector Cursors (MIT Licensed) & Overlay Mount:
+   Mount `#demo-cursor` (and optional `#demo-step-badge`) on `document.documentElement` (`<html>`) rather than `document.body`. This guarantees that when `document.body` is scaled during Auto-Zoom & Pan, the cursor and callout badge remain at a crisp `1x` scale and never clip outside the viewport:
    ```javascript
    await page.addInitScript(() => {
      window.addEventListener('DOMContentLoaded', () => {
+       window.__demoCamera = { scale: 1, tx: 0, ty: 0 };
+       document.body.style.transformOrigin = '0 0';
+       document.body.style.transition = 'transform 0.48s cubic-bezier(0.22, 1, 0.36, 1)';
+       document.body.style.willChange = 'transform';
+
        const cursor = document.createElement('div');
        cursor.id = 'demo-cursor';
        cursor.style.cssText = 'position:fixed;top:0;left:0;pointer-events:none;z-index:999999;transform-origin:0 0;transform:scale(1);transition:transform 0.06s ease;will-change:left, top, transform;';
@@ -119,7 +131,7 @@ Key implementation patterns for `recordings/.temp/runner.mjs`:
 
        let currentState = 'default';
        cursor.innerHTML = ICONS.default;
-       document.body.appendChild(cursor);
+       document.documentElement.appendChild(cursor);
 
        window.addEventListener('mousemove', (e) => {
          cursor.style.left = `${e.clientX}px`;
@@ -149,17 +161,134 @@ Key implementation patterns for `recordings/.temp/runner.mjs`:
    });
    ```
 
-3. Natural pacing helpers:
-   - Use `page.mouse.move(x, y, { steps: 25 })` for smooth visible cursor trajectories before clicks.
-   - Use `page.locator().fill(text)` followed by typing delay, or `page.type(selector, text, { delay: 90 })` to make user input readable.
-   - Add settle pauses (`await page.waitForTimeout(800)`) after state changes, modal popups, or page switches.
+3. Speed Ramping & Natural Pacing Helpers (Default: Active):
+   - **Adaptive Typing (`humanType`)**: Short strings ($\le 15$ chars, such as short codes or usernames) type at normal speed (`85ms`/char). Longer strings ($> 15$ chars, such as emails, URLs, or descriptions) automatically ramp up to `1.5x–2x` speed (`40ms`/char) so typing never drags.
+   - **Loading / Async Speed Ramping (`withSpeedRamp`)**: Wrap slow network submissions or loading spinners with `withSpeedRamp(page, async () => { ... }, 1.75)`. It records the exact `[start, end]` timestamps so FFmpeg can accelerate that segment by `1.5x–2x` during post-processing while keeping important UI reveals (modals, theme transitions, toasts) at `1x` speed (`await page.waitForTimeout(800)`).
+   ```javascript
+   async function moveAndClick(page, selector, { steps = 25 } = {}) {
+     const loc = page.locator(selector).first();
+     await loc.waitFor({ state: 'visible' });
+     const box = await loc.boundingBox();
+     if (!box) throw new Error(`Element not visible: ${selector}`);
+     const targetX = box.x + box.width / 2;
+     const targetY = box.y + box.height / 2;
+     await page.mouse.move(targetX, targetY, { steps });
+     await page.waitForTimeout(120);
+     await page.mouse.down();
+     await page.waitForTimeout(90);
+     await page.mouse.up();
+   }
 
-4. Graceful closure: Always close `context` and `browser` to ensure video buffers are fully flushed to disk:
+   async function humanType(page, selector, text) {
+     await moveAndClick(page, selector);
+     // Speed ramping: 1x (85ms) for short inputs, ~2x (42ms) for longer text
+     const delay = text.length > 15 ? 42 : 85;
+     await page.keyboard.type(text, { delay });
+   }
+
+   async function withSpeedRamp(fn, speed = 1.75) {
+     const start = (Date.now() - recordingStartMs) / 1000;
+     const result = await fn();
+     const end = (Date.now() - recordingStartMs) / 1000;
+     if (end - start >= 0.8) {
+       fastSegments.push({ start: Number(start.toFixed(2)), end: Number(end.toFixed(2)), speed });
+     }
+     return result;
+   }
+   ```
+
+4. Optional Helper: Auto-Zoom & Pan (Include ONLY when user opts in):
+   Smoothly zooms and pans the camera onto compact form controls or toggles using clamped viewport translation (so the camera never reveals empty margins outside the page), then resets to `1x` for full-page navigation:
+   ```javascript
+   async function zoomTo(page, selector, scale = 1.65) {
+     const loc = page.locator(selector).first();
+     await loc.waitFor({ state: 'visible' });
+     await page.evaluate(({ sel, targetScale }) => {
+       const el = document.querySelector(sel);
+       if (!el) return;
+       const cam = window.__demoCamera || { scale: 1, tx: 0, ty: 0 };
+       const rect = el.getBoundingClientRect();
+       // Recover unscaled element center in viewport coordinates
+       const cx0 = (rect.left + rect.width / 2 - cam.tx) / cam.scale;
+       const cy0 = (rect.top + rect.height / 2 - cam.ty) / cam.scale;
+       const vw = window.innerWidth;
+       const vh = window.innerHeight;
+       // Clamp translation so viewport edges never show blank space
+       const rawTx = vw / 2 - cx0 * targetScale;
+       const rawTy = vh / 2 - cy0 * targetScale;
+       const tx = Math.max(vw * (1 - targetScale), Math.min(0, rawTx));
+       const ty = Math.max(vh * (1 - targetScale), Math.min(0, rawTy));
+       window.__demoCamera = { scale: targetScale, tx, ty };
+       document.body.style.transform = `translate(${tx}px, ${ty}px) scale(${targetScale})`;
+     }, { sel: selector, targetScale: scale });
+     await page.waitForTimeout(500); // Wait for smooth camera zoom transition
+   }
+
+   async function resetZoom(page) {
+     await page.evaluate(() => {
+       window.__demoCamera = { scale: 1, tx: 0, ty: 0 };
+       document.body.style.transform = 'translate(0px, 0px) scale(1)';
+     });
+     await page.waitForTimeout(500);
+   }
+   ```
+
+5. Optional Helper: Step Callout / Floating Badges (Include ONLY when user opts in):
+   Injects a semi-transparent storytelling pill badge at the bottom-center (or corner) of the viewport so viewers immediately understand the intent of each step without audio narration:
+   ```javascript
+   async function showStep(page, stepText) {
+     await page.evaluate((text) => {
+       let badge = document.getElementById('demo-step-badge');
+       if (!badge) {
+         badge = document.createElement('div');
+         badge.id = 'demo-step-badge';
+         badge.style.cssText = [
+           'position:fixed',
+           'bottom:28px',
+           'left:50%',
+           'transform:translateX(-50%) translateY(8px)',
+           'padding:8px 18px',
+           'background:rgba(17, 24, 39, 0.86)',
+           'color:#f9fafb',
+           'border:1px solid rgba(255, 255, 255, 0.18)',
+           'border-radius:9999px',
+           'font:600 14px/1.4 system-ui, -apple-system, sans-serif',
+           'letter-spacing:0.01em',
+           'box-shadow:0 8px 24px rgba(0, 0, 0, 0.35)',
+           'backdrop-filter:blur(8px)',
+           'pointer-events:none',
+           'z-index:999998',
+           'opacity:0',
+           'transition:opacity 0.25s ease, transform 0.25s ease'
+         ].join(';');
+         document.documentElement.appendChild(badge);
+       }
+       badge.textContent = text;
+       requestAnimationFrame(() => {
+         badge.style.opacity = '1';
+         badge.style.transform = 'translateX(-50%) translateY(0)';
+       });
+     }, stepText);
+   }
+
+   async function hideStep(page) {
+     await page.evaluate(() => {
+       const badge = document.getElementById('demo-step-badge');
+       if (badge) {
+         badge.style.opacity = '0';
+         badge.style.transform = 'translateX(-50%) translateY(8px)';
+       }
+     });
+   }
+   ```
+
+6. Graceful closure: Always close `context` and `browser` to ensure video buffers are fully flushed to disk:
    ```javascript
    const videoPath = await page.video().path();
    await context.close();
    await browser.close();
    console.log(`RAW_VIDEO_PATH:${videoPath}`);
+   console.log(`FAST_SEGMENTS:${JSON.stringify(fastSegments)}`);
    ```
 
 ### Step 4: Execute Recording
@@ -169,18 +298,29 @@ Execute the colocated script in headless mode:
 node recordings/.temp/runner.mjs
 ```
 
-Capture the printed `RAW_VIDEO_PATH` (inside `recordings/.temp/`).
+Capture the printed `RAW_VIDEO_PATH` (inside `recordings/.temp/`) and `FAST_SEGMENTS`.
 
-### Step 5: Post-Processing and Transcoding
+### Step 5: Post-Processing, Speed Ramping, and Transcoding
 
 Transcode or move the raw video to the final standardized output destination:
 
-- Native WebM: If WebM was requested, move and rename the raw file from staging:
+- **Optional Timeline Speed Ramping** (when `FAST_SEGMENTS` is non-empty, e.g., a loading spinner from `t=3.0s` to `t=6.5s` accelerated by `1.75x`):
+  Pre-process the raw WebM using FFmpeg `trim` + `setpts` before or during transcoding so waiting periods play at `1.5x–2x` while normal interactions stay at `1x`:
+  ```bash
+  ffmpeg -y -i recordings/.temp/<hash>.webm -filter_complex \
+    "[0:v]trim=0:3.0,setpts=PTS-STARTPTS[v0]; \
+     [0:v]trim=3.0:6.5,setpts=(PTS-STARTPTS)/1.75[v1]; \
+     [0:v]trim=6.5,setpts=PTS-STARTPTS[v2]; \
+     [v0][v1][v2]concat=n=3:v=1:a=0[outv]" \
+    -map "[outv]" -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
+  ```
+
+- Native WebM (no post-process speed segments): Move and rename the raw file from staging:
   ```bash
   mv recordings/.temp/<hash>.webm recordings/<scenario-name>.webm
   ```
 
-- Convert to MP4 (H.264 with AAC/no audio, web-optimized faststart):
+- Convert to MP4 (H.264 with no audio, web-optimized faststart):
   ```bash
   ffmpeg -y -i recordings/.temp/<hash>.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
   ```
@@ -209,6 +349,7 @@ Transcode or move the raw video to the final standardized output destination:
 - Orphan Directory Leak: Never create standalone directories like `scripts/` or `tmp/`. Always place transient scripts in `recordings/.temp/runner.mjs` so `rm -rf recordings/.temp` cleanly purges everything.
 - Git Hygiene: Add `recordings/.temp/` to `.gitignore` so temporary runs never pollute Git status.
 - Machine-Speed Teleportation: By default, Playwright teleports the mouse cursor instantly and clicks in 5ms. Always use stepped mouse moves and humanized typing delays so humans can follow the video.
-- Dynamic Spinners and Hydration: Use `waitForSelector` or `waitForLoadState('networkidle')` instead of arbitrary short sleeps to prevent recordings from capturing incomplete UI states.
+- Overlay Scaling & Coordinate Drift during Auto-Zoom: Never append `#demo-cursor` or `#demo-step-badge` to `document.body` if `document.body` is zoomed with CSS `transform`. Always append overlays to `document.documentElement` (`<html>`) and wait (`500ms`) for the zoom transition to finish before calling `boundingBox()` or moving the mouse cursor.
+- Dynamic Spinners and Hydration: Use `waitForSelector` or `waitForLoadState('networkidle')` instead of arbitrary short sleeps to prevent recordings from capturing incomplete UI states, and wrap unavoidable slow loading waits in `withSpeedRamp()` so they can be accelerated `1.5x–2x`.
 - Viewport Mismatch: Set both `viewport` and `recordVideo.size` to the exact same dimensions in `browser.newContext()` to avoid black borders or canvas scaling distortion.
 - Headless Environment: Playwright video recording works reliably with `headless: true`. Do not force `headless: false` unless a virtual framebuffer (Xvfb) or active display server is guaranteed.
