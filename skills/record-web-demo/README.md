@@ -18,7 +18,9 @@ The **`record-web-demo`** skill gives AI coding agents a deterministic, polished
 - **Dual-Tone High Contrast**: Cursors feature white fills with dark borders and drop shadows, ensuring clear visibility across light, dark, and mixed application themes.
 - **Speed Ramping (Default: Active)**: Automatically accelerates long text typing (`1.5x–2x` via `42ms` character delay) and compresses slow loading spinners/network waits via FFmpeg `setpts` filters while keeping key UI transitions (modals, theme changes) at normal `1x` speed.
 - **Auto-Zoom & Pan on Hotspots (Opt-in, Default: Off)**: Smoothly zooms (`1.65x`) and pans the viewport toward compact inputs, password fields, or theme toggles so small controls remain legible on mobile screens, then zooms back out (`1x`) for full-layout navigation without exposing blank margins or scaling the cursor/badges.
-- **Step Callout / Floating Badges (Opt-in, Default: Off)**: Renders semi-transparent pill badges (`backdrop-filter: blur(8px)`) at the bottom of the screen (e.g., *"Langkah 1: Masuk dengan Akun Admin"*) to provide clear visual storytelling without requiring voiceover audio.
+- **Step Callout / Visual Narration (Opt-in, Default: Off)**: Supports two user-selectable layout styles:
+  1. **`static-bar` (Recommended)**: Reserves a dedicated `52px` static footer bar (`#0f172a`) at the bottom while scaling the web application stage to `~0.92x` above it so the badge stays completely stationary without overlapping page controls.
+  2. **`floating`**: Keeps the web page at full `1.0x` scale and renders a floating semi-transparent pill badge that automatically dodges buttons and cursor proximity.
 - **Humanized Interaction Pacing**: Simulates realistic human interactions using stepped cursor curves (`steps: 25`), adaptive typing delays (`85ms` short / `42ms` long), and settle pauses (`800ms`) after state transitions or modals.
 - **Isolated Atomic Staging**: Colocates transient runner scripts and raw video buffers inside `recordings/.temp/`, ensuring a clean workspace that purges completely in a single `rm -rf` command.
 - **Multi-Format Export Pipeline**:
@@ -64,7 +66,26 @@ Establishes recording parameters and confirms optional features before generatin
 - **Visual & Timing Enhancements**:
   - **Speed Ramping** (**Default: Active**): Adaptive typing (`1.5x–2x` for long text) and FFmpeg timeline acceleration for slow loading spinners.
   - **Auto-Zoom & Pan** (**Default: Off** — ask user whether to enable): Smooth camera zoom onto compact inputs and toggles.
-  - **Step Callout / Floating Badges** (**Default: Off** — ask user whether to enable): Visual narration pills for silent demos.
+  - **Step Callout / Visual Narration** (**Default: Off** — ask user whether to enable and show visual comparison between `[A] Static Bottom Bar` and `[B] Floating Badge`):
+    ```text
+    [A] Static Bottom Bar (mode: 'static-bar' — Recommended)
+    +---------------------------------------------------+
+    |  +---------------------------------------------+  |
+    |  |         Halaman Web Demo (Scale ~0.92x)     |  |
+    |  |       Bebas tumpang tindih dengan tombol    |  |
+    |  +---------------------------------------------+  |
+    +---------------------------------------------------+
+    |         [ Langkah 1: Masuk dengan Akun ]          | <- Bar Statis 52px (Posisi Tetap)
+    +---------------------------------------------------+
+
+    [B] Floating Badge (mode: 'floating')
+    +---------------------------------------------------+
+    |                                                   |
+    |            Halaman Web Demo (Full 1.0x)           |
+    |                                                   |
+    |         ( Langkah 1: Masuk dengan Akun )          | <- Pill Melayang (Auto-Dodge jika ada tombol)
+    +---------------------------------------------------+
+    ```
 - **Output Destination**: Standardized under `recordings/<scenario-name>.<ext>` (avoids generic `demo.mp4` collisions).
 
 ### Step 3: Script Generation with Dynamic Vector Cursors & Helpers
@@ -128,7 +149,7 @@ Verifies output file size and delivers the relative/absolute path to the user.
 ## 💡 Best Practices & Gotchas
 
 - **Video Buffer Flush**: Playwright writes video frames asynchronously. Always await `context.close()` and `browser.close()` before moving or converting video files, otherwise files will be 0 bytes.
-- **Overlay Mounting during Auto-Zoom**: Append `#demo-cursor` and `#demo-step-badge` to `document.documentElement` (`<html>`) while applying CSS camera zoom (`transform: translate(...) scale(...)`) to `document.body`. This prevents the cursor and floating badge from scaling up or clipping outside the viewport, and wait `500ms` for the zoom transition before reading `boundingBox()`.
+- **Overlay Mounting & Static Step Bar**: Append `#demo-cursor` and `#demo-step-bar` to `document.documentElement` (`<html>`) while applying CSS stage scaling (`~0.92x` base stage or `1.65x` hotspot zoom) to `document.body`. Persist cursor and step state in `sessionStorage` (`__demoCursor`, `__demoStep`, `__demoStepBar`) so page reloads never reset the cursor to `(0, 0)` or drop the bottom bar, and call `showStep()` **before** `zoomTo()` / `moveAndClick()`.
 - **Viewport Synchronization**: Always match `viewport` and `recordVideo.size` in `browser.newContext()` to identical dimensions (e.g. `1280x720`) to prevent black borders or distortion.
 - **Dynamic Selectors vs. Hardcoded Sleep**: Use `waitForSelector` or `waitForLoadState('networkidle')` before initiating interactions rather than arbitrary short sleeps.
 - **Zero Directory Pollution**: Never place temporary scripts in root or create separate `scripts/` or `tmp/` folders in the target project. Keep transient assets confined to `recordings/.temp/`.
