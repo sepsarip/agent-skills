@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>URS Interactive Viewer — {{PROJECT_NAME}}</title>
+  <style>
+    :root {
+      --bg: #f8fafc; --surface: #ffffff; --text: #0f172a; --muted: #475569;
+      --primary: #2563eb; --border: #e2e8f0;
+      --a2-bg: #dcfce7; --a2-text: #166534;
+      --a1-bg: #dbeafe; --a1-text: #1e40af;
+      --a0-bg: #fef9c3; --a0-text: #854d0e;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+    aside { width: 280px; background: var(--surface); border-right: 1px solid var(--border); padding: 1.5rem; overflow-y: auto; flex-shrink: 0; }
+    main { flex: 1; padding: 2rem 3rem; overflow-y: auto; }
+    .toolbar { display: flex; gap: 1rem; margin-bottom: 1.5rem; align-items: center; background: var(--surface); padding: 1rem; border-radius: 8px; border: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+    .toolbar input, .toolbar select { padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; }
+    .toolbar button { margin-left: auto; background: var(--primary); color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .urs-content { background: var(--surface); padding: 2.5rem; border-radius: 12px; border: 1px solid var(--border); max-width: 960px; line-height: 1.6; }
+    h1, h2, h3, h4 { color: var(--text); }
+    h2 { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-top: 2.5rem; }
+    h4 { background: #f1f5f9; padding: 0.75rem 1rem; border-left: 4px solid var(--primary); border-radius: 4px; margin-top: 2rem; }
+    blockquote { background: #eff6ff; border-left: 4px solid var(--primary); margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 0 6px 6px 0; }
+    pre { background: #0f172a; color: #f8fafc; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; }
+    table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; }
+    th, td { border: 1px solid var(--border); padding: 0.65rem 0.85rem; text-align: left; }
+    th { background: #f1f5f9; font-weight: 600; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+    .badge-a2 { background: var(--a2-bg); color: var(--a2-text); }
+    .badge-a1 { background: var(--a1-bg); color: var(--a1-text); }
+    .badge-a0 { background: var(--a0-bg); color: var(--a0-text); }
+    @media print {
+      aside, .toolbar { display: none !important; }
+      body, main { height: auto; overflow: visible; padding: 0; }
+      .urs-content { border: none; padding: 0; max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <h3 style="margin-top:0;">📑 URS Navigation</h3>
+    <p style="font-size:0.8rem; color:var(--muted);">ISO/IEC/IEEE 29148 + EARS + QUS</p>
+    <div id="toc-list" style="font-size:0.9rem; line-height:1.8;"></div>
+  </aside>
+  <main>
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="Search User Story, Actor, or keyword..." style="flex:1;" oninput="filterContent()" />
+      <select id="provenanceFilter" onchange="filterContent()">
+        <option value="ALL">All Provenance Statuses (A0-A2)</option>
+        <option value="A2">A2: Verified Source</option>
+        <option value="A1">A1: Inferred Rule</option>
+        <option value="A0">A0: Candidate / TBD</option>
+      </select>
+      <button onclick="window.print()">🖨️ Export PDF</button>
+    </div>
+    <div class="urs-content" id="ursContainer">
+      {{HTML_CONTENT}}
+    </div>
+  </main>
+  <script>
+    // Automatically generate table of contents & highlight provenance badges
+    document.addEventListener("DOMContentLoaded", () => {
+      const container = document.getElementById("ursContainer");
+      container.innerHTML = container.innerHTML
+        .replace(/\[A2:[^\]]+\]/g, m => `<span class="badge badge-a2">${m}</span>`)
+        .replace(/\[A1:[^\]]+\]/g, m => `<span class="badge badge-a1">${m}</span>`)
+        .replace(/\[A0:[^\]]+\]/g, m => `<span class="badge badge-a0">${m}</span>`);
+
+      const headers = container.querySelectorAll("h2, h3, h4");
+      const toc = document.getElementById("toc-list");
+      headers.forEach((h, idx) => {
+        h.id = "sec-" + idx;
+        const a = document.createElement("a");
+        a.href = "#sec-" + idx;
+        a.textContent = h.textContent;
+        a.style.display = "block";
+        a.style.color = "var(--text)";
+        a.style.textDecoration = "none";
+        a.style.paddingLeft = h.tagName === "H3" ? "0.75rem" : h.tagName === "H4" ? "1.5rem" : "0";
+        a.style.fontWeight = h.tagName === "H2" ? "600" : "400";
+        toc.appendChild(a);
+      });
+    });
+
+    function filterContent() {
+      const q = document.getElementById("searchInput").value.toLowerCase();
+      const prov = document.getElementById("provenanceFilter").value;
+      const blocks = document.querySelectorAll("#ursContainer h4");
+      blocks.forEach(h4 => {
+        let el = h4.nextElementSibling;
+        let text = h4.textContent;
+        const siblings = [];
+        while (el && !["H2", "H3", "H4"].includes(el.tagName)) {
+          text += " " + el.textContent;
+          siblings.push(el);
+          el = el.nextElementSibling;
+        }
+        const matchQuery = text.toLowerCase().includes(q);
+        const matchProv = prov === "ALL" || text.includes(`[${prov}:`);
+        const show = matchQuery && matchProv;
+        h4.style.display = show ? "" : "none";
+        siblings.forEach(s => s.style.display = show ? "" : "none");
+      });
+    }
+  </script>
+</body>
+</html>
