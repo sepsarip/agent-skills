@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{REPORT_TITLE}}</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --surface: #111827;
+      --surface-2: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --active-bg: rgba(16, 185, 129, 0.16);
+      --active-fg: #34d399;
+      --overturned-bg: rgba(239, 68, 68, 0.16);
+      --overturned-fg: #f87171;
+      --review-bg: rgba(245, 158, 11, 0.16);
+      --review-fg: #fbbf24;
+      --ts-bg: rgba(56, 189, 248, 0.14);
+      --ts-fg: #38bdf8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+      padding-bottom: 60px;
+    }
+    /* Sticky Audio & Header Bar */
+    .header-bar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(17, 24, 39, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 28px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .brand { font-weight: 700; font-size: 16px; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+    .audio-dock {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--surface-2);
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .audio-dock input[type="file"] { font-size: 11px; color: var(--muted); max-width: 210px; }
+    audio { height: 30px; outline: none; }
+    .container { max-width: 1180px; margin: 28px auto; padding: 0 24px; }
+    h1 { font-size: 1.9rem; color: var(--accent); margin-bottom: 14px; }
+    h2 {
+      font-size: 1.25rem;
+      color: var(--text);
+      margin: 28px 0 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    p { margin-bottom: 12px; color: #e2e8f0; }
+    ul, ol { margin: 8px 0 16px 22px; }
+    li { margin-bottom: 6px; color: #e2e8f0; }
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .badge-active { background: var(--active-bg); color: var(--active-fg); border: 1px solid rgba(52,211,153,0.35); }
+    .badge-overturned {
+      background: var(--overturned-bg);
+      color: var(--overturned-fg);
+      border: 1px solid rgba(248,113,113,0.35);
+      text-decoration: line-through;
+    }
+    .badge-review { background: var(--review-bg); color: var(--review-fg); border: 1px solid rgba(251,191,36,0.35); }
+    .ts-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--ts-bg);
+      color: var(--ts-fg);
+      border: 1px solid rgba(56,189,248,0.4);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .ts-chip:hover { background: var(--accent); color: #090d16; transform: translateY(-1px); }
+    /* Tables */
+    .table-wrap { overflow-x: auto; margin: 14px 0 22px; border-radius: 10px; border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; background: var(--surface); }
+    th { background: var(--surface-2); color: var(--accent); text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: #e2e8f0; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    /* Mermaid & Code */
+    .mermaid-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      margin: 14px 0;
+      display: flex;
+      justify-content: center;
+      overflow-x: auto;
+    }
+    pre.json-box {
+      background: #0b1120;
+      border: 1px solid var(--border);
+      padding: 16px;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      color: #93c5fd;
+    }
+    .btn {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 24px;
+      background: var(--surface-2);
+      border: 1px solid var(--accent);
+      color: var(--text);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: none;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <header class="header-bar">
+    <div class="brand">
+      <span>⚡ {{REPORT_TITLE}}</span>
+    </div>
+    <div class="audio-dock">
+      <span>🎧 Load Recording:</span>
+      <input type="file" id="audioInput" accept="audio/*,video/*" />
+      <audio id="mediaPlayer" controls></audio>
+      <button class="btn" onclick="downloadICS()">📅 Export .ics Calendar</button>
+    </div>
+  </header>
+
+  <main class="container">
+    {{REPORT_BODY_HTML}}
+  </main>
+
+  <div class="toast" id="toastBox"></div>
+
+  <script src="{{MERMAID_CDN}}"></script>
+  <script>
+    if (window.mermaid) {
+      mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    }
+    const audioInput = document.getElementById('audioInput');
+    const mediaPlayer = document.getElementById('mediaPlayer');
+    const toastBox = document.getElementById('toastBox');
+
+    function showToast(msg) {
+      toastBox.textContent = msg;
+      toastBox.style.display = 'block';
+      setTimeout(() => { toastBox.style.display = 'none'; }, 3500);
+    }
+
+    audioInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      mediaPlayer.src = url;
+      showToast(`Loaded local recording: ${file.name}. Click any @[HH:MM:SS] badge to seek!`);
+    });
+
+    function parseTimeToSeconds(hms) {
+      const parts = hms.trim().split(':').map(Number);
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      return 0;
+    }
+
+    function seekToTimestamp(tsString) {
+      const match = tsString.match(/(\d{1,2}:\d{2}(?::\d{2})?)/);
+      if (!match) return;
+      const secs = parseTimeToSeconds(match[1]);
+      if (!mediaPlayer.src) {
+        showToast(`Timestamp ${match[1]} (${secs}s) selected. Load your audio file above to play!`);
+        return;
+      }
+      mediaPlayer.currentTime = secs;
+      mediaPlayer.play();
+      showToast(`Seeking recording to ${match[1]}...`);
+    }
+
+    function downloadICS() {
+      const title = document.title || 'Follow-Up Meeting';
+      const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Meeting Intelligence Skill//EN',
+        'BEGIN:VEVENT',
+        `UID:${Date.now()}@meeting-skill.local`,
+        `DTSTAMP:${now}`,
+        `SUMMARY:${title} (Follow-Up + 15m Buffer)`,
+        'DESCRIPTION:Generated by meeting-to-action-plan skill with 15-minute cognitive buffer protection.',
+        'END:VEVENT',
+        'END:VCALENDAR'
+      ].join('\r\n');
+      const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'meeting-followup.ics';
+      a.click();
+    }
+  </script>
+</body>
+</html>
+
