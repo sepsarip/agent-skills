@@ -182,3 +182,4 @@ Our financial projections are rooted in unit economics, customer acquisition mil
 <!-- _notes:
 We are raising our target round to accelerate engineering, execute our go-to-market playbook, and hit critical ARR and product milestones over the next 18 months. Thank you.
 -->
+

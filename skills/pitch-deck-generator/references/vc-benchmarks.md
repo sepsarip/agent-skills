@@ -36,3 +36,4 @@
 6. **Text Walls (>45 Words per Slide)**: Paragraphs of prose cause immediate investor drop-off.
 7. **Fantasy Hockey-Stick Financials**: Projecting $0 to $100M ARR in 3 years without unit-driver math (`Customers × ACV`).
 8. **Burying Real Traction**: If a startup has real revenue or explosive growth, highlight it immediately rather than hiding it at the end.
+

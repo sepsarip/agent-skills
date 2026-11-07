@@ -115,3 +115,4 @@ python3 skills/pitch-deck-generator/scripts/render_deck.py deck.md --output deck
 * **Viewing Presentations**:
   * `deck.html` opens directly in any modern browser (`←`/`→` to navigate, `S` for speaker notes, `F` for fullscreen, `Ctrl+P` / `Cmd+P` to save as PDF).
   * `deck.md` is 100% compatible with the Marp for VS Code extension and `@marp-team/marp-cli`.
+

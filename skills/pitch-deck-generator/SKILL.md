@@ -87,3 +87,4 @@ Every quantitative metric, market size figure, traction number, and financial ta
 2. **Never use Top-Down TAM claims**: Forbidden phrase: *"1% of a $X Billion market"*.
 3. **Never claim generic "Proprietary AI" as a Moat**: Defensibility must rely on proprietary data flywheels, deep workflow integration, network effects, or distribution lock-in.
 4. **Never exceed 45 visual words per slide**: Push narrative detail into `<!-- _notes: ... -->`.
+
