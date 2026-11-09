@@ -481,7 +481,7 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
     # 11. Cover Page Structure & Logo Placeholder
     # -------------------------------------------------------------
     def test_cover_page_and_logo_placeholder(self):
-        """Verify cover page contains title, version, date, and logo placeholder followed by page break."""
+        """Verify cover page contains title, version, date, and localized logo placeholder followed by page break."""
         out_dir = os.path.join(self.tmp_dir, "cover_test_out")
         cmd = [
             sys.executable,
@@ -498,24 +498,47 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res.returncode, 0, f"build_manual failed: {res.stderr}")
 
-        # Check Markdown cover
+        # Check Markdown cover (English default)
         md_file = os.path.join(out_dir, "CoverManual.md")
         with open(md_file, "r", encoding="utf-8") as f:
             md_text = f.read()
-        self.assertIn("[ LOGO APLIKASI ]", md_text)
+        self.assertIn("[ APPLICATION LOGO ]", md_text)
         self.assertIn("Test Manual", md_text)
         self.assertIn("1.0.0", md_text)
         self.assertIn("2026-11-02", md_text)
         self.assertIn('<div style="page-break-after: always;"></div>', md_text)
 
-        # Check DOCX cover
+        # Check DOCX cover (English default)
         import zipfile
         docx_file = os.path.join(out_dir, "CoverManual.docx")
         with zipfile.ZipFile(docx_file, "r") as z:
             doc_xml = z.read("word/document.xml").decode("utf-8")
-            self.assertIn("LOGO APLIKASI", doc_xml)
+            self.assertIn("APPLICATION LOGO", doc_xml)
             self.assertIn("Test Manual", doc_xml)
             self.assertIn("1.0.0", doc_xml)
+
+        # Check Indonesian localized cover placeholder
+        id_spec = dict(self.sample_spec)
+        id_spec["language"] = "id"
+        id_spec_file = os.path.join(self.tmp_dir, "manual_spec_id.json")
+        with open(id_spec_file, "w", encoding="utf-8") as f:
+            json.dump(id_spec, f, indent=2)
+        cmd_id = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "build_manual.py"),
+            "--spec",
+            id_spec_file,
+            "--out-dir",
+            out_dir,
+            "--basename",
+            "CoverManualID",
+            "--format",
+            "md",
+        ]
+        res_id = subprocess.run(cmd_id, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res_id.returncode, 0, f"build_manual id failed: {res_id.stderr}")
+        with open(os.path.join(out_dir, "CoverManualID.md"), "r", encoding="utf-8") as f:
+            self.assertIn("[ LOGO APLIKASI ]", f.read())
 
     # -------------------------------------------------------------
     # 12. TOC & Chapter Page Breaks
@@ -941,6 +964,461 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         cx, cy = int(m.group(1)), int(m.group(2))
         self.assertLessEqual(cx, int(5.8 * 914400))
         self.assertLessEqual(cy, int(5.2 * 914400))
+
+    # -------------------------------------------------------------
+    # Regression Tests for Audit Fixes
+    # -------------------------------------------------------------
+    def test_cairo_auto_adjust_collision_nudge_y2(self):
+        """Verify Cairo fallback fake_target uses ay2 + 10 (not ax2 + 10) when nudging colliding arrows."""
+        import struct
+        import zlib
+
+        # Create a 400x200 PNG so ax2=320, ay2=100 has a large difference between ax2 and ay2
+        wide_png = os.path.join(self.tmp_dir, "wide.png")
+        w, h = 400, 200
+        raw_data = b"".join(b"\x00" + b"\xff\xff\xff" * w for _ in range(h))
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+
+        def _chunk(ctype, data):
+            return (
+                struct.pack(">I", len(data))
+                + ctype
+                + data
+                + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+            )
+
+        with open(wide_png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw_data)) + _chunk(b"IEND", b""))
+
+        # Create layout sidecar with a large obstacle covering the arrow tail and local nudge region
+        layout_file = os.path.join(self.tmp_dir, "wide.layout.json")
+        with open(layout_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "text_rects": [
+                        {"x1": 180, "y1": 20, "x2": 310, "y2": 180, "text": "Obstacle"}
+                    ]
+                },
+                f,
+            )
+
+        out_png = os.path.join(self.tmp_dir, "wide_cairo_out.png")
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "capture_and_annotate.py"),
+            "annotate",
+            "--engine",
+            "cairo",
+            "--input",
+            wide_png,
+            "--output",
+            out_png,
+            "--arrow",
+            "250,100,320,100,1",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"annotate failed: {res.stderr}")
+        self.assertIn("[AUTO-ADJUST]", res.stdout)
+
+        audit_path = os.path.join(self.tmp_dir, "wide_cairo_out.arrows.json")
+        with open(audit_path, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+        arrow = audit["arrows"][0]
+        # Head y2 should stay near ay2=100 (within [90, 110]), never distorted toward ax2=320
+        self.assertLessEqual(abs(arrow["y2"] - 100.0), 15.0, f"Distorted arrow y2: {arrow}")
+
+    def test_verify_outputs_exits_nonzero_on_broken_links(self):
+        """Verify verify_outputs returns False and build_manual.py exits non-zero on broken outputs."""
+        from build_manual import verify_outputs
+
+        broken_md = os.path.join(self.tmp_dir, "broken.md")
+        with open(broken_md, "w", encoding="utf-8") as f:
+            f.write("# Manual\n- [Broken Link](#umg-ch-99)\n---\n*Page 1*\n")
+        self.assertFalse(verify_outputs(md_path=broken_md))
+
+    def test_import_md_roundtrip_from_build_manual(self):
+        """Verify manual_state.py import-md cleanly round-trips Markdown generated by build_manual.py."""
+        out_dir = os.path.join(self.tmp_dir, "roundtrip_out")
+        cmd_build = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "build_manual.py"),
+            "--spec",
+            self.spec_file,
+            "--out-dir",
+            out_dir,
+            "--basename",
+            "RoundtripManual",
+            "--format",
+            "md",
+        ]
+        res_b = subprocess.run(cmd_build, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res_b.returncode, 0, f"build failed: {res_b.stderr}")
+
+        md_path = os.path.join(out_dir, "RoundtripManual.md")
+        reimported_spec_path = os.path.join(self.tmp_dir, "reimported_spec.json")
+        cmd_imp = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "manual_state.py"),
+            "import-md",
+            "--input",
+            md_path,
+            "--spec-out",
+            reimported_spec_path,
+        ]
+        res_i = subprocess.run(cmd_imp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res_i.returncode, 0, f"import-md failed: {res_i.stderr}")
+
+        with open(reimported_spec_path, "r", encoding="utf-8") as f:
+            imported = json.load(f)
+
+        self.assertEqual(imported["title"], "Test Manual")
+        self.assertEqual(imported["subtitle"], "Automated Test Suite")
+        self.assertEqual(imported["version"], "1.0.0")
+        self.assertEqual(len(imported["chapters"]), 1)
+        ch = imported["chapters"][0]
+        self.assertEqual(ch["title"], "Introduction")
+        self.assertEqual(len(ch["sections"]), 1)
+        sec = ch["sections"][0]
+        self.assertEqual(sec["title"], "First Section")
+        self.assertNotIn("<div", sec["body"])
+        self.assertNotIn("<style>", sec["body"])
+        self.assertEqual(len(sec["figures"]), 1)
+        fig = sec["figures"][0]
+        self.assertEqual(fig["id"], "1.1")
+        self.assertEqual(fig["title"], "Sample Screenshot")
+        self.assertTrue(fig["image_path"].endswith("test.png"))
+        self.assertEqual(fig["bullets"], ["**Step 1**: Click the button."])
+
+    def test_libreoffice_html_escaping(self):
+        """Verify special characters (&, <, >) in titles/captions are safely escaped in build_docx_via_libreoffice."""
+        special_spec = json.loads(json.dumps(self.sample_spec))
+        special_spec["title"] = "Manual <Admin & Ops>"
+        special_spec["subtitle"] = "Role: R&D / <QA>"
+        special_spec["chapters"][0]["title"] = "Auth & <Security>"
+        special_spec["chapters"][0]["sections"][0]["title"] = "Login <Portal> & SSO"
+        special_spec["chapters"][0]["sections"][0]["figures"][0]["title"] = 'Screen "A" & <B>'
+
+        spec_path = os.path.join(self.tmp_dir, "special_spec.json")
+        with open(spec_path, "w", encoding="utf-8") as f:
+            json.dump(special_spec, f)
+
+        out_dir = os.path.join(self.tmp_dir, "special_out")
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "build_manual.py"),
+            "--spec",
+            spec_path,
+            "--out-dir",
+            out_dir,
+            "--basename",
+            "SpecialManual",
+            "--format",
+            "docx",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"build_manual failed: {res.stderr}")
+        docx_path = os.path.join(out_dir, "SpecialManual.docx")
+        self.assertTrue(os.path.isfile(docx_path))
+
+    # -------------------------------------------------------------
+    # Phase 2 Root-Cause Regression Tests (manual_book Audit)
+    # -------------------------------------------------------------
+    def test_stdlib_oxml_three_sections_roman_and_dot_leaders(self):
+        """Verify native stdlib OpenXML builder emits 3 A4 sections, Roman TOC, 9026 dot leaders, PAGEREF, and '→' normalization."""
+        import zipfile
+
+        arrow_spec = json.loads(json.dumps(self.sample_spec))
+        arrow_spec["chapters"][0]["sections"][0]["figures"][0]["bullets"] = [
+            "**1. Tombol Log in** -> Klik untuk masuk ke sistem."
+        ]
+        spec_path = os.path.join(self.tmp_dir, "oxml_spec.json")
+        with open(spec_path, "w", encoding="utf-8") as f:
+            json.dump(arrow_spec, f)
+
+        out_dir = os.path.join(self.tmp_dir, "oxml_out")
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "build_manual.py"),
+            "--spec",
+            spec_path,
+            "--out-dir",
+            out_dir,
+            "--basename",
+            "OxmlManual",
+            "--format",
+            "all",
+            "--verify",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"build_manual failed: {res.stderr}\n{res.stdout}")
+
+        docx_file = os.path.join(out_dir, "OxmlManual.docx")
+        with zipfile.ZipFile(docx_file, "r") as zf:
+            doc_bytes = zf.read("word/document.xml")
+        doc_str = doc_bytes.decode("utf-8")
+        root = ET.fromstring(doc_bytes)
+        w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+        sect_prs = list(root.iter(f"{w}sectPr"))
+        self.assertEqual(len(sect_prs), 3, f"Expected 3 sectPr blocks (Cover, TOC, Main), got {len(sect_prs)}")
+        self.assertIsNone(sect_prs[0].find(f"{w}footerReference"), "Cover section must not have a footer")
+
+        pg_toc = sect_prs[1].find(f"{w}pgNumType")
+        self.assertIsNotNone(pg_toc)
+        self.assertEqual(pg_toc.attrib.get(f"{w}fmt"), "lowerRoman")
+        self.assertEqual(pg_toc.attrib.get(f"{w}start"), "1")
+
+        pg_main = sect_prs[2].find(f"{w}pgNumType")
+        self.assertIsNotNone(pg_main)
+        self.assertEqual(pg_main.attrib.get(f"{w}fmt"), "decimal")
+        self.assertEqual(pg_main.attrib.get(f"{w}start"), "1")
+
+        self.assertIn("PAGEREF umgCh1", doc_str)
+        self.assertIn('w:leader="dot"', doc_str)
+        self.assertIn('w:pos="9026"', doc_str)
+        self.assertIn("→", doc_str)
+        self.assertNotIn("->", doc_str)
+
+        for tbl_w in root.iter(f"{w}tblW"):
+            if tbl_w.attrib.get(f"{w}type") == "dxa":
+                self.assertLessEqual(int(tbl_w.attrib.get(f"{w}w", "0")), 9026)
+
+    def test_pass2_exact_page_numbers_via_pdftotext(self):
+        """Verify 2-pass PDF compilation populates exact multi-page section numbers and Roman 'i' footer."""
+        if not (shutil.which("soffice") or shutil.which("libreoffice")) or not shutil.which("pdftotext"):
+            self.skipTest("LibreOffice or pdftotext not available in environment")
+
+        # Create a 1280x800 PNG so two sections with figures span 2 pages in Chapter 1
+        import cairo
+
+        tall_fig = os.path.join(self.tmp_dir, "screen_1280.png")
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1280, 800)
+        ctx = cairo.Context(surf)
+        ctx.set_source_rgb(0.97, 0.98, 1.0)
+        ctx.paint()
+        surf.write_to_png(tall_fig)
+        rel_fig = os.path.relpath(tall_fig, os.getcwd())
+
+        multi_spec = {
+            "title": "Multi Page Accuracy Manual",
+            "subtitle": "Verification of 2-Pass PDF TOC Numbers",
+            "version": "1.0.0",
+            "date": "2026-11-07",
+            "language": "id",
+            "chapters": [
+                {
+                    "number": 1,
+                    "title": "Akses Sistem",
+                    "intro": "Bab pembuka untuk menguji akurasi halaman pada Daftar Isi.",
+                    "sections": [
+                        {
+                            "number": "1.1",
+                            "title": "Bagian Pertama Halaman Satu",
+                            "body": "Penjelasan bagian pertama secara lengkap (Lihat Gambar 1.1).",
+                            "figures": [
+                                {
+                                    "id": "1.1",
+                                    "title": "Layar Pertama",
+                                    "image_path": rel_fig,
+                                    "bullets": [
+                                        "**1. Kolom Email**: Masukkan alamat email kerja Anda.",
+                                        "**2. Kolom Kata Sandi**: Masukkan kata sandi akun Anda.",
+                                        "**3. Tombol Log in**: Klik untuk membuka halaman utama.",
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "number": "1.2",
+                            "title": "Bagian Kedua Halaman Berikutnya",
+                            "body": "Penjelasan bagian kedua yang berada di halaman kedua (Lihat Gambar 1.2).",
+                            "figures": [
+                                {
+                                    "id": "1.2",
+                                    "title": "Layar Kedua",
+                                    "image_path": rel_fig,
+                                    "bullets": [
+                                        "**1. Menu Profil**: Buka pengaturan profil pengguna.",
+                                        "**2. Tombol Save**: Klik untuk menyimpan perubahan.",
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+        spec_path = os.path.join(self.tmp_dir, "multi_spec.json")
+        with open(spec_path, "w", encoding="utf-8") as f:
+            json.dump(multi_spec, f)
+
+        out_dir = os.path.join(self.tmp_dir, "multi_out")
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "build_manual.py"),
+            "--spec",
+            spec_path,
+            "--out-dir",
+            out_dir,
+            "--basename",
+            "MultiManual",
+            "--format",
+            "all",
+            "--export-pdf",
+            "--verify",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"build_manual failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("Resolved", res.stdout)
+
+        pdf_file = os.path.join(out_dir, "MultiManual.pdf")
+        proc = subprocess.run(
+            ["pdftotext", pdf_file, "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        pages = proc.stdout.split("\x0c")
+        if pages and pages[-1] == "":
+            pages = pages[:-1]
+        self.assertGreaterEqual(len(pages), 4, f"Expected >= 4 PDF pages, got {len(pages)}")
+        # Page 1 (idx 0): Cover without page number
+        self.assertIn("Multi Page Accuracy Manual", pages[0])
+        # Page 2 (idx 1): Daftar Isi with Roman numeral 'i' and section 1.2 mapped to page 2
+        self.assertIn("Daftar Isi", pages[1])
+        self.assertRegex(pages[1].strip(), r"\bi\s*$")
+        self.assertRegex(pages[1], r"1\.2 Bagian Kedua Halaman Berikutnya.*2")
+        # Page 3 (idx 2): Bab 1 starts on page '1'
+        self.assertIn("Bab 1: Akses Sistem", pages[2])
+        self.assertRegex(pages[2].strip(), r"\b1\s*$")
+
+    def test_cairo_pixel_obstacle_avoidance_without_layout_json(self):
+        """Verify Cairo engine detects heading pixels and places button arrows in clear space without .layout.json."""
+        import cairo
+
+        raw_png = os.path.join(self.tmp_dir, "appearance_mock.png")
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 800, 500)
+        ctx = cairo.Context(surf)
+        ctx.set_source_rgb(1.0, 1.0, 1.0)
+        ctx.paint()
+
+        # Draw dark heading text directly above 3 horizontal buttons (y=155..195)
+        ctx.set_source_rgb(0.08, 0.1, 0.15)
+        ctx.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        ctx.set_font_size(20)
+        ctx.move_to(250, 170)
+        ctx.show_text("Appearance settings")
+        ctx.set_font_size(14)
+        ctx.move_to(250, 194)
+        ctx.show_text("Update your account's appearance settings")
+
+        # Draw 3 buttons at y=218..252 with clean white space below (y=260..480)
+        for bx, lbl in ((250, "Light"), (340, "Dark"), (430, "System")):
+            ctx.set_source_rgb(0.94, 0.95, 0.97)
+            ctx.rectangle(bx, 218, 82, 34)
+            ctx.fill_preserve()
+            ctx.set_source_rgb(0.75, 0.78, 0.82)
+            ctx.set_line_width(1.5)
+            ctx.stroke()
+            ctx.set_source_rgb(0.1, 0.12, 0.16)
+            ctx.set_font_size(13)
+            ctx.move_to(bx + 18, 240)
+            ctx.show_text(lbl)
+
+        surf.write_to_png(raw_png)
+
+        out_png = os.path.join(self.tmp_dir, "appearance_out.png")
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "capture_and_annotate.py"),
+            "annotate",
+            "--auto",
+            "--engine",
+            "cairo",
+            "--input",
+            raw_png,
+            "--output",
+            out_png,
+            "--target",
+            "250,218,332,252,1",
+            "--target",
+            "340,218,422,252,2",
+            "--target",
+            "430,218,512,252,3",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"annotate failed: {res.stderr}")
+
+        audit_file = os.path.join(self.tmp_dir, "appearance_out.arrows.json")
+        with open(audit_file, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+        self.assertEqual(audit["unresolved_collisions"], 0, f"Collisions remained: {audit}")
+        for arr in audit["arrows"]:
+            # None of the badge centers (x1, y1) may sit on top of the heading band (x=240..560, y=145..205)
+            in_heading = (240 <= arr["x1"] <= 560) and (145 <= arr["y1"] <= 205)
+            self.assertFalse(in_heading, f"Badge occluded heading text: {arr}")
+
+    def test_manual_state_portable_paths_and_collision_gate(self):
+        """Verify manual_state resolves portable paths in custom folder and blocks mark --verified on collisions."""
+        custom_dir = os.path.join(self.tmp_dir, "custom_manual")
+        os.makedirs(os.path.join(custom_dir, "assets", "raw"), exist_ok=True)
+        os.makedirs(os.path.join(custom_dir, "assets", "final"), exist_ok=True)
+        raw_p = os.path.join(custom_dir, "assets", "raw", "1_1.png")
+        fin_p = os.path.join(custom_dir, "assets", "final", "1_1.png")
+        shutil.copy2(self.dummy_png, raw_p)
+        shutil.copy2(self.dummy_png, fin_p)
+
+        # Spec uses legacy 'docs/manual_book/assets/...' path inside relocated 'custom_manual/' directory
+        spec_obj = json.loads(json.dumps(self.sample_spec))
+        spec_obj["chapters"][0]["sections"][0]["figures"][0]["image_path"] = "docs/manual_book/assets/final/1_1.png"
+        spec_obj["chapters"][0]["sections"][0]["figures"][0]["source"] = {
+            "raw": "docs/manual_book/assets/raw/1_1.png"
+        }
+        spec_p = os.path.join(custom_dir, "manual_spec.json")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            json.dump(spec_obj, f)
+
+        # 1. Status should find both raw and final images via portable fallback (0 missing)
+        res_st = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "manual_state.py"),
+                "status",
+                "--spec",
+                spec_p,
+                "--out-dir",
+                custom_dir,
+                "--json",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res_st.returncode, 0, res_st.stderr)
+        st_data = json.loads(res_st.stdout)
+        self.assertEqual(st_data["missing_raw"], 0)
+        self.assertEqual(st_data["missing_annotated"], 0)
+
+        # 2. Write an audit sidecar with unresolved_collisions=1 and verify mark --verified rejects it
+        audit_p = os.path.join(custom_dir, "assets", "final", "1_1.arrows.json")
+        with open(audit_p, "w", encoding="utf-8") as f:
+            json.dump({"unresolved_collisions": 1, "arrows": []}, f)
+
+        prog_p = os.path.join(custom_dir, "manual_progress.json")
+        res_bad = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "manual_state.py"),
+                "mark",
+                "--progress",
+                prog_p,
+                "--figure",
+                "1.1",
+                "--verified",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(res_bad.returncode, 0, "mark --verified should fail when unresolved_collisions > 0")
+        self.assertIn("unresolved", res_bad.stderr.lower())
 
 
 if __name__ == "__main__":

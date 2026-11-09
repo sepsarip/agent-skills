@@ -15,8 +15,8 @@ This policy governs how the agent and bundled Python scripts interact with the u
 
 ## 2. File System & Path Traversal Protection
 
-- **Workspace Containment**: All file read and write operations in `capture_and_annotate.py`, `build_manual.py`, and `manual_state.py` validate paths using `os.path.realpath`. Any path escaping the active workspace triggers an immediate error.
-- **Restricted Extensions**: Image processing scripts only accept `.png`, `.jpg`, `.jpeg`, and `.webp` files. Document builders only write `.md` and `.docx` files.
+- **Workspace Containment**: All file read and write operations in `capture_and_annotate.py`, `annotate_cairo.py`, `embed_images.py`, `build_manual.py`, and `manual_state.py` validate paths using `os.path.realpath`. Any path escaping the active workspace triggers an immediate error.
+- **Restricted Extensions**: Image processing scripts only accept `.png`, `.jpg`, `.jpeg`, and `.webp` files. Document builders only write `.md`, `.docx`, and `.pdf` files.
 - **Atomic File Writes**: Metadata and progress updates (`manual_progress.json`, `manual_spec.json`) use temporary files with `os.replace` to prevent corrupted states during unexpected terminations.
 
 ---

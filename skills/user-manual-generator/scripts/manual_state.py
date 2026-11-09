@@ -29,6 +29,42 @@ def validate_workspace_path(target_path: str, must_exist: bool = False) -> str:
     return real_target
 
 
+def resolve_spec_asset_path(
+    raw_path: str,
+    spec_dir: Optional[str] = None,
+    out_dir: Optional[str] = None,
+) -> str:
+    """Resolve an asset path from manual_spec.json with portable fallback to spec_dir/out_dir."""
+    if not raw_path:
+        return ""
+    primary = validate_workspace_path(raw_path, must_exist=False)
+    if os.path.exists(primary):
+        return primary
+
+    norm = raw_path.replace("\\", "/")
+    assets_idx = norm.find("assets/")
+    suffix = norm[assets_idx:] if assets_idx >= 0 else None
+
+    for base_dir in (spec_dir, out_dir):
+        if not base_dir:
+            continue
+        for rel_cand in (raw_path, suffix):
+            if not rel_cand:
+                continue
+            try:
+                cand = validate_workspace_path(os.path.join(base_dir, rel_cand), must_exist=False)
+                if os.path.exists(cand):
+                    return cand
+            except Exception:
+                continue
+
+    if norm.startswith("assets/") and (spec_dir or out_dir):
+        return validate_workspace_path(
+            os.path.join(spec_dir or out_dir or ".", raw_path), must_exist=False
+        )
+    return primary
+
+
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -50,11 +86,12 @@ def save_json_atomic(path: str, data: Any) -> None:
 # ---------------------------------------------------------
 def cmd_status(args: argparse.Namespace) -> None:
     spec_path = validate_workspace_path(args.spec, must_exist=True)
+    spec_dir = os.path.dirname(spec_path)
     out_dir = validate_workspace_path(args.out_dir, must_exist=False)
     progress_path = (
         validate_workspace_path(args.progress, must_exist=False)
         if args.progress
-        else os.path.join(os.path.dirname(spec_path), "manual_progress.json")
+        else os.path.join(spec_dir, "manual_progress.json")
     )
 
     spec = load_json(spec_path)
@@ -79,22 +116,24 @@ def cmd_status(args: argparse.Namespace) -> None:
             for fig in sec.get("figures", []):
                 total_figures += 1
                 fig_id = str(fig.get("id", ""))
-                final_path = fig.get("image_path", "")
+                final_raw_spec = fig.get("image_path", "")
+                final_path = resolve_spec_asset_path(final_raw_spec, spec_dir=spec_dir, out_dir=out_dir) if final_raw_spec else ""
                 source_info = fig.get("source", {})
-                raw_path = source_info.get("raw", "")
+                raw_spec = source_info.get("raw", "")
+                raw_path = resolve_spec_asset_path(raw_spec, spec_dir=spec_dir, out_dir=out_dir) if raw_spec else ""
                 url = source_info.get("url", "")
 
                 # Check raw capture
-                if raw_path and not os.path.exists(raw_path):
-                    missing_raw.append({"id": fig_id, "url": url, "raw": raw_path})
+                if raw_spec and not os.path.exists(raw_path):
+                    missing_raw.append({"id": fig_id, "url": url, "raw": raw_path or raw_spec})
 
                 # Check final annotated image
-                if not final_path or not os.path.exists(final_path):
+                if not final_raw_spec or not os.path.exists(final_path):
                     missing_annotated.append(
                         {
                             "id": fig_id,
-                            "raw": raw_path,
-                            "final": final_path,
+                            "raw": raw_path or raw_spec,
+                            "final": final_path or final_raw_spec,
                             "source": source_info,
                         }
                     )
@@ -215,6 +254,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------
 def cmd_mark(args: argparse.Namespace) -> None:
     progress_path = validate_workspace_path(args.progress, must_exist=False)
+    progress_dir = os.path.dirname(progress_path)
     data = {}
     if os.path.exists(progress_path):
         try:
@@ -236,6 +276,46 @@ def cmd_mark(args: argparse.Namespace) -> None:
 
     if args.figure:
         fig_id = str(args.figure)
+        if args.verified and not getattr(args, "force", False):
+            spec_cand = (
+                validate_workspace_path(args.spec, must_exist=True)
+                if getattr(args, "spec", "")
+                else os.path.join(progress_dir, "manual_spec.json")
+            )
+            if os.path.isfile(spec_cand):
+                try:
+                    spec_obj = load_json(spec_cand)
+                except Exception:
+                    spec_obj = {}
+                spec_dir = os.path.dirname(spec_cand)
+                matched_img_path = ""
+                for ch in spec_obj.get("chapters", []):
+                    for sec in ch.get("sections", []):
+                        for fig in sec.get("figures", []):
+                            if str(fig.get("id", "")) == fig_id:
+                                matched_img_path = fig.get("image_path", "")
+                                break
+                if matched_img_path:
+                    resolved_final = resolve_spec_asset_path(
+                        matched_img_path, spec_dir=spec_dir, out_dir=spec_dir
+                    )
+                    if not os.path.isfile(resolved_final):
+                        raise FileNotFoundError(
+                            f"Cannot mark figure {fig_id} as verified: annotated image not found at '{resolved_final}'."
+                        )
+                    arrows_audit = f"{os.path.splitext(resolved_final)[0]}.arrows.json"
+                    if os.path.isfile(arrows_audit):
+                        try:
+                            audit_data = load_json(arrows_audit)
+                        except Exception:
+                            audit_data = {}
+                        unresolved = int(audit_data.get("unresolved_collisions", 0) or 0)
+                        if unresolved > 0:
+                            raise ValueError(
+                                f"Cannot mark figure {fig_id} as verified: {unresolved} unresolved text/UI collision(s) "
+                                f"recorded in '{arrows_audit}'. Re-annotate cleanly or pass --force after visual inspection."
+                            )
+
         fig_entry = data["figures"].setdefault(fig_id, {})
         if args.verified:
             fig_entry["verified"] = True
@@ -414,6 +494,9 @@ def cmd_import_md(args: argparse.Namespace) -> None:
     with open(in_path, "r", encoding="utf-8") as f:
         content = f.read()
 
+    # Strip <style>...</style> blocks generated by build_manual.py
+    content = re.sub(r"<style>.*?</style>\s*", "", content, flags=re.DOTALL | re.IGNORECASE)
+
     lines = content.splitlines()
     spec: Dict[str, Any] = {
         "title": "Application User Manual",
@@ -432,15 +515,108 @@ def cmd_import_md(args: argparse.Namespace) -> None:
     re_h2 = re.compile(r"^##\s+(?:Chapter|Bab)?\s*(\d+)?[:.]?\s*(.+)$", re.IGNORECASE)
     re_h3 = re.compile(r"^###\s+(\d+\.\d+)?\s*(.+)$")
     re_img = re.compile(r"^!\[(.*?)\]\((.*?)\)$")
-    re_footer = re.compile(r"^\*?(?:Page|Halaman)\s+\d+(?:\s+(?:of|dari)\s+\d+)?\*?$", re.IGNORECASE)
+    re_html_img = re.compile(r'<img\s+[^>]*src="([^"]+)"[^>]*alt="([^"]*)"', re.IGNORECASE)
+    re_html_cap = re.compile(r"<p>\s*<em>\s*<b>(.*?)</b>\s*</em>\s*</p>", re.IGNORECASE)
+    re_anchor = re.compile(r'^<a\s+id="[^"]+"\s*>\s*</a>$', re.IGNORECASE)
+    re_footer = re.compile(
+        r"^\*?(?:(?:Page|Halaman)\s+\d+(?:\s+(?:of|dari)\s+\d+)?|\d+|[ivxlcdm]+)\*?$",
+        re.IGNORECASE,
+    )
+    re_meta = re.compile(
+        r"\*\*(?:Version|Versi)\*\*:\s*([^|]+?)(?:\s*\|\s*\*\*(?:Last Updated|Tanggal Pembaruan)\*\*:\s*(.+))?$",
+        re.IGNORECASE,
+    )
 
     ch_counter = 0
+    in_toc = False
+    in_center_div = False
+    pending_html_img: Optional[str] = None
+    pending_html_alt: Optional[str] = None
 
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped == "---" or stripped.startswith("<div style="):
             continue
+        if re_anchor.match(stripped):
+            continue
         if re_footer.match(stripped):
+            continue
+        if stripped.startswith('<div align="center" style='):
+            # Cover logo or placeholder block
+            continue
+
+        # Handle centered HTML figure block (<div align="center"> ... </div>)
+        if stripped == '<div align="center">' or stripped.startswith('<div align="center">'):
+            m_inline_cap = re_html_cap.search(stripped)
+            m_inline_img = re_html_img.search(stripped)
+            if m_inline_img:
+                pending_html_img = m_inline_img.group(1).strip()
+                pending_html_alt = m_inline_img.group(2).strip()
+            if m_inline_cap and current_sec is not None:
+                caption = m_inline_cap.group(1).strip()
+                fig_id = f"{current_sec['number']}.{len(current_sec['figures']) + 1}"
+                fig_title = caption
+                m_cap = re.match(r"^(?:Figure|Gambar)\s*(\d+\.\d+)[:.]?\s*(.*)$", caption, re.IGNORECASE)
+                if m_cap:
+                    fig_id = m_cap.group(1)
+                    fig_title = m_cap.group(2) or caption
+                current_fig = {
+                    "id": fig_id,
+                    "title": fig_title,
+                    "image_path": pending_html_img or "",
+                    "bullets": [],
+                }
+                current_sec["figures"].append(current_fig)
+                pending_html_img = None
+                pending_html_alt = None
+                in_center_div = False
+                continue
+            if not stripped.endswith("</div>"):
+                in_center_div = True
+            continue
+
+        if in_center_div:
+            m_hi = re_html_img.search(stripped)
+            if m_hi:
+                pending_html_img = m_hi.group(1).strip()
+                pending_html_alt = m_hi.group(2).strip()
+            m_hc = re_html_cap.search(stripped)
+            if m_hc and current_sec is not None:
+                caption = m_hc.group(1).strip()
+                fig_id = f"{current_sec['number']}.{len(current_sec['figures']) + 1}"
+                fig_title = caption
+                m_cap = re.match(r"^(?:Figure|Gambar)\s*(\d+\.\d+)[:.]?\s*(.*)$", caption, re.IGNORECASE)
+                if m_cap:
+                    fig_id = m_cap.group(1)
+                    fig_title = m_cap.group(2) or caption
+                current_fig = {
+                    "id": fig_id,
+                    "title": fig_title,
+                    "image_path": pending_html_img or "",
+                    "bullets": [],
+                }
+                current_sec["figures"].append(current_fig)
+                pending_html_img = None
+                pending_html_alt = None
+            if stripped.endswith("</div>"):
+                if pending_html_img and current_sec is not None:
+                    caption = pending_html_alt or ""
+                    fig_id = f"{current_sec['number']}.{len(current_sec['figures']) + 1}"
+                    fig_title = caption
+                    m_cap = re.match(r"^(?:Figure|Gambar)\s*(\d+\.\d+)[:.]?\s*(.*)$", caption, re.IGNORECASE)
+                    if m_cap:
+                        fig_id = m_cap.group(1)
+                        fig_title = m_cap.group(2) or caption
+                    current_fig = {
+                        "id": fig_id,
+                        "title": fig_title,
+                        "image_path": pending_html_img,
+                        "bullets": [],
+                    }
+                    current_sec["figures"].append(current_fig)
+                pending_html_img = None
+                pending_html_alt = None
+                in_center_div = False
             continue
 
         # Check H1
@@ -449,12 +625,28 @@ def cmd_import_md(args: argparse.Namespace) -> None:
             spec["title"] = m1.group(1).strip()
             continue
 
+        # Check cover metadata or subtitle before first chapter
+        if not current_ch and not in_toc:
+            m_meta = re_meta.match(stripped)
+            if m_meta:
+                spec["version"] = m_meta.group(1).strip()
+                if m_meta.group(2):
+                    spec["date"] = m_meta.group(2).strip()
+                continue
+            if stripped.startswith("**") and stripped.endswith("**") and not spec["subtitle"]:
+                spec["subtitle"] = stripped[2:-2].strip()
+                continue
+
         # Check H2 (Chapter)
         m2 = re_h2.match(stripped)
         if m2:
             ch_title = m2.group(2).strip()
             if ch_title.lower() in {"table of contents", "daftar isi", "list of figures", "daftar gambar"}:
+                in_toc = True
                 continue
+            in_toc = False
+            if stripped.lower().startswith("## bab"):
+                spec["language"] = "id"
             ch_counter += 1
             ch_num = int(m2.group(1)) if m2.group(1) else ch_counter
             current_ch = {
@@ -466,6 +658,9 @@ def cmd_import_md(args: argparse.Namespace) -> None:
             spec["chapters"].append(current_ch)
             current_sec = None
             current_fig = None
+            continue
+
+        if in_toc:
             continue
 
         # Check H3 (Section)
@@ -483,7 +678,7 @@ def cmd_import_md(args: argparse.Namespace) -> None:
             current_fig = None
             continue
 
-        # Check Image
+        # Check Image (Markdown syntax)
         m_img = re_img.match(stripped)
         if m_img and current_sec:
             caption = m_img.group(1).strip()
@@ -598,23 +793,48 @@ def cmd_renumber(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------
 def cmd_outline_docx(args: argparse.Namespace) -> None:
     docx_path = validate_workspace_path(args.input, must_exist=True)
+    print(f"=== Document Outline: {docx_path} ===")
     try:
         from docx import Document
+        doc = Document(docx_path)
+        for p in doc.paragraphs:
+            style_name = p.style.name if p.style else ""
+            text = p.text.strip()
+            if not text:
+                continue
+            if "Heading 1" in style_name:
+                print(f"# {text}")
+            elif "Heading 2" in style_name:
+                print(f"  ## {text}")
+            elif "Heading 3" in style_name:
+                print(f"    ### {text}")
+            elif text.lower().startswith("figure") or text.lower().startswith("gambar"):
+                print(f"      [Image Caption] {text}")
+        return
     except ImportError:
-        sys.exit("Error: python-docx is required for outline-docx. Run: pip install python-docx")
+        pass
 
-    doc = Document(docx_path)
-    print(f"=== Document Outline: {docx_path} ===")
-    for p in doc.paragraphs:
-        style_name = p.style.name if p.style else ""
-        text = p.text.strip()
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    with zipfile.ZipFile(docx_path, "r") as zf:
+        root = ET.fromstring(zf.read("word/document.xml"))
+    for p in root.iter(f"{{{w_ns}}}p"):
+        style_val = ""
+        p_pr = p.find(f"{{{w_ns}}}pPr")
+        if p_pr is not None:
+            ps = p_pr.find(f"{{{w_ns}}}pStyle")
+            if ps is not None:
+                style_val = ps.attrib.get(f"{{{w_ns}}}val", "")
+        text = "".join((t.text or "") for t in p.iter(f"{{{w_ns}}}t")).strip()
         if not text:
             continue
-        if "Heading 1" in style_name:
+        if style_val in ("Heading1", "Heading 1"):
             print(f"# {text}")
-        elif "Heading 2" in style_name:
+        elif style_val in ("Heading2", "Heading 2"):
             print(f"  ## {text}")
-        elif "Heading 3" in style_name:
+        elif style_val in ("Heading3", "Heading 3"):
             print(f"    ### {text}")
         elif text.lower().startswith("figure") or text.lower().startswith("gambar"):
             print(f"      [Image Caption] {text}")
@@ -654,9 +874,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="docs/manual_book/manual_progress.json",
         help="Path to manual_progress.json (default: docs/manual_book/manual_progress.json).",
     )
+    p_mark.add_argument("--spec", default="", help="Optional path to manual_spec.json for collision audit checks.")
     p_mark.add_argument("--phase", choices=["outline-approved"], help="Record milestone phase.")
     p_mark.add_argument("--figure", help="Figure ID to mark (e.g. '1.1').")
     p_mark.add_argument("--verified", action="store_true", help="Mark figure as visually verified.")
+    p_mark.add_argument("--force", action="store_true", help="Bypass collision audit gate when marking verified.")
     p_mark.add_argument("--comment", help="Optional comment or inspection note.")
     p_mark.set_defaults(func=cmd_mark)
 

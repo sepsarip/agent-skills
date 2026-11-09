@@ -27,8 +27,10 @@ Never use developer, database, or network architecture terms in the manual book 
 | Backend exception / stack trace | System notification message | Pesan pemberitahuan dari sistem |
 
 ### Formatting Rules
-- **UI Elements**: Wrap exact interface labels, button names, menus, and field names in **Bold** (for example: Klik tombol **Simpan**, lalu pilih menu **Unduh Laporan**).
-- **Paragraph & Bullet Alignment**: All body text paragraphs and step-by-step bullet points must be **Justified** (rata kiri-kanan).
+- **UI Elements**: Wrap exact interface labels, button names, menus, and field names in **Bold** (for example: Click the **Save** button, then select **Download Report**).
+- **Cross-Language Exact On-Screen UI Labels**: When the manual is written in a language different from the application's UI (for example, a Bahasa Indonesia manual for an English UI), always preserve the exact on-screen label in **Bold** alongside the localized meaning so users can locate it immediately (for example: `Klik tombol **Save** (Simpan)` or `**3. Tombol Masuk (Log in)**: Klik tombol **Log in** untuk membuka Dasbor Utama.`).
+- **No Raw ASCII Arrows**: Never write raw ASCII arrows (`->` or `-->`) in prose or bullet points. Write natural sentences (`Click **Save** to store your changes.`) or use a clean typographic arrow (`→`) only for menu trails (`**Settings** → **Appearance**`).
+- **Paragraph & Bullet Alignment**: All body text paragraphs and step-by-step bullet points must be **Justified**.
 - **Punctuation**: Do not use em-dashes (`—`) or en-dashes (`–`). Use commas, colons, periods, or parentheses.
 
 ---
@@ -52,8 +54,9 @@ Every screenshot must be anchored to the text through a strict citation and capt
 Immediately following each figure caption, explain the screen elements or step-by-step actions using concise bullet points:
 
 - **Limit**: 2 to 5 bullet points per screenshot. If a workflow has more than 5 steps, split it into two screenshots so visual arrows do not clutter the screen.
-- **Structure per Bullet**: `**[Arrow Number / Element Name]**: [Concise action instruction] -> [Expected outcome].`
-- **Text Alignment**: All bullet points are styled as **Justified** (rata kiri-kanan).
+- **Structure per Bullet**: `**[Arrow Number / On-Screen Element Name]**: [Concise action instruction and expected outcome in natural prose].`
+- **Logical Callout Order**: Number badges sequentially from top-to-bottom (and left-to-right within the same row) matching the user's reading and action order.
+- **Text Alignment**: All bullet points are styled as **Justified**.
 - **Avoid Text Occlusion**:
   - Never place arrowhead tips or callout badges directly over button text, input labels, or instructions.
   - Arrows point to the border or corner of the target element.
@@ -68,10 +71,10 @@ Immediately following each figure caption, explain the screen elements or step-b
 - **Cover Page (1 Full Page)**:
   - Must occupy its own standalone full page with a strict page break before the Table of Contents.
   - Contains:
-    1. **Logo Placeholder**: Visual dashed box `[ LOGO APLIKASI ]` (or real logo image if `"logo_path"` is specified in `manual_spec.json`).
+    1. **Logo Placeholder**: Visual dashed box `[ APPLICATION LOGO ]` by default (`[ LOGO APLIKASI ]` when `"language": "id"`, or real logo image if `"logo_path"` is specified in `manual_spec.json`).
     2. **Title**: Primary manual book title in large bold font (26pt).
     3. **Subtitle**: Clear, descriptive subtitle explaining the target user role.
-    4. **Metadata**: Version (`Versi`) and Generation / Update Date (`Tanggal Pembaruan`).
+    4. **Metadata**: Version (`Version` / `Versi`) and Generation / Update Date (`Last Updated` / `Tanggal Pembaruan`).
   - Contains **no page number** in the footer.
 - **Front Matter (Page 2: Table of Contents)**:
   - Table of Contents (*Daftar Isi*) occupies Page 2. List of Figures (*Daftar Gambar*) is omitted/not required.
@@ -81,7 +84,7 @@ Immediately following each figure caption, explain the screen elements or step-b
   - Numbered using Arabic numerals starting at `1` (`1`, `2`, `3`...).
   - **Chapter 1** always starts on a fresh page immediately after the Table of Contents.
   - Each subsequent Chapter begins on a new page.
-  - Paragraphs and bullet points are formatted as **Justified** (rata kiri-kanan).
+  - Paragraphs and bullet points are formatted as **Justified**.
   - Bold text (`**text**`) is rendered as true native bold formatting in Word documents and PDFs.
 
 ### Page Margins, Header, & Footer Standards

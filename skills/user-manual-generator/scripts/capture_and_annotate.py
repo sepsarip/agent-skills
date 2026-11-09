@@ -21,9 +21,14 @@ try:
 except ImportError:
     HAVE_PIL = False
 
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
 try:
     import cairo
     from annotate_cairo import (
+        detect_cairo_surface_obstacles,
         draw_badge_and_arrow as cairo_draw_badge_and_arrow,
         draw_bounding_highlight as cairo_draw_bounding_highlight,
     )
@@ -466,11 +471,20 @@ def find_optimal_arrow_placement(
             if not (8 <= head_x <= img_width - 8 and 8 <= head_y <= img_height - 8):
                 continue
 
+            if circle_intersects_rect(tail_x, tail_y, badge_radius + 4, bx1, by1, bx2, by2):
+                continue
+
             has_badge_collision = False
             for obs in obstacles:
+                if obs is target_box:
+                    continue
+                ox1, oy1 = min(obs["x1"], obs["x2"]), min(obs["y1"], obs["y2"])
+                ox2, oy2 = max(obs["x1"], obs["x2"]), max(obs["y1"], obs["y2"])
+                if ox1 <= bx1 + 2 and oy1 <= by1 + 2 and ox2 >= bx2 - 2 and oy2 >= by2 - 2:
+                    continue
                 if circle_intersects_rect(
                     tail_x, tail_y, badge_radius + clearance,
-                    obs["x1"], obs["y1"], obs["x2"], obs["y2"]
+                    ox1, oy1, ox2, oy2
                 ):
                     has_badge_collision = True
                     break
@@ -481,8 +495,19 @@ def find_optimal_arrow_placement(
             for obs in obstacles:
                 if obs is target_box:
                     continue
+                ox1, oy1 = min(obs["x1"], obs["x2"]), min(obs["y1"], obs["y2"])
+                ox2, oy2 = max(obs["x1"], obs["x2"]), max(obs["y1"], obs["y2"])
+                if ox1 <= bx1 + 2 and oy1 <= by1 + 2 and ox2 >= bx2 - 2 and oy2 >= by2 - 2:
+                    continue
+                # Ignore obstacles located inside the target element itself
+                if ox1 >= bx1 - 6 and ox2 <= bx2 + 6 and oy1 >= by1 - 6 and oy2 <= by2 + 6:
+                    continue
+                # Ignore small pixel-density cells straddling the arrow tip on the target border
+                if (ox2 - ox1) <= 35 and (oy2 - oy1) <= 35:
+                    if (ox1 - 8) <= head_x <= (ox2 + 8) and (oy1 - 8) <= head_y <= (oy2 + 8):
+                        continue
                 if rect_intersects_segment(
-                    obs["x1"], obs["y1"], obs["x2"], obs["y2"],
+                    ox1, oy1, ox2, oy2,
                     tail_x, tail_y, head_x, head_y,
                     pad=clearance
                 ):
@@ -581,6 +606,57 @@ def _draw_arrow_with_callout(
         )
 
 
+def _arrow_hits_obstacles(
+    ax1: float,
+    ay1: float,
+    ax2: float,
+    ay2: float,
+    badge_r: float,
+    obstacles: List[Dict[str, float]],
+    target_box: Optional[Dict[str, float]] = None,
+) -> bool:
+    """Return True if badge or shaft collides with non-target UI obstacles."""
+    for obs in obstacles:
+        ox1, oy1 = min(obs["x1"], obs["x2"]), min(obs["y1"], obs["y2"])
+        ox2, oy2 = max(obs["x1"], obs["x2"]), max(obs["y1"], obs["y2"])
+        if target_box is not None:
+            if obs is target_box:
+                continue
+            bx1, by1 = min(target_box["x1"], target_box["x2"]), min(target_box["y1"], target_box["y2"])
+            bx2, by2 = max(target_box["x1"], target_box["x2"]), max(target_box["y1"], target_box["y2"])
+            if ox1 <= bx1 + 2 and oy1 <= by1 + 2 and ox2 >= bx2 - 2 and oy2 >= by2 - 2:
+                continue
+        if circle_intersects_rect(ax1, ay1, badge_r, ox1, oy1, ox2, oy2):
+            return True
+        if target_box is not None:
+            if ox1 >= bx1 - 6 and ox2 <= bx2 + 6 and oy1 >= by1 - 6 and oy2 <= by2 + 6:
+                continue
+        if (ox2 - ox1) <= 35 and (oy2 - oy1) <= 35:
+            if (ox1 - 8) <= ax2 <= (ox2 + 8) and (oy1 - 8) <= ay2 <= (oy2 + 8):
+                continue
+        if rect_intersects_segment(ox1, oy1, ox2, oy2, ax1, ay1, ax2, ay2):
+            return True
+    return False
+
+
+def _parse_boxes(args: argparse.Namespace) -> List[Tuple[float, float, float, float]]:
+    """Parse --box (x1,y1,x2,y2) and --box-xywh (x,y,w,h) into normalized (x1,y1,x2,y2) tuples."""
+    parsed: List[Tuple[float, float, float, float]] = []
+    for box_spec in getattr(args, "box", None) or []:
+        parts = [p.strip() for p in box_spec.split(",")]
+        if len(parts) != 4:
+            raise ValueError(f"Invalid --box format '{box_spec}'. Expected 'x1,y1,x2,y2'.")
+        b1, b2, b3, b4 = map(float, parts)
+        parsed.append((min(b1, b3), min(b2, b4), max(b1, b3), max(b2, b4)))
+    for xywh_spec in getattr(args, "box_xywh", None) or []:
+        parts = [p.strip() for p in xywh_spec.split(",")]
+        if len(parts) != 4:
+            raise ValueError(f"Invalid --box-xywh format '{xywh_spec}'. Expected 'x,y,w,h'.")
+        bx, by, bw, bh = map(float, parts)
+        parsed.append((bx, by, bx + max(1.0, bw), by + max(1.0, bh)))
+    return parsed
+
+
 def _cmd_annotate_cairo(
     args: argparse.Namespace,
     in_path: str,
@@ -596,19 +672,15 @@ def _cmd_annotate_cairo(
     obstacles: List[Dict[str, float]] = []
     if layout_data and layout_data.get("text_rects"):
         obstacles.extend(layout_data["text_rects"])
+    else:
+        obstacles.extend(detect_cairo_surface_obstacles(surface))
 
-    for box_spec in args.box or []:
-        parts = [p.strip() for p in box_spec.split(",")]
-        if len(parts) != 4:
-            raise ValueError(f"Invalid --box format '{box_spec}'. Expected 'x1,y1,x2,y2'.")
-        b1, b2, b3, b4 = map(float, parts)
-        if b3 > b1 and b4 > b2 and (b3 - b1 > 5 or b4 - b2 > 5):
-            bx, by, bw, bh = b1, b2, b3 - b1, b4 - b2
-        else:
-            bx, by, bw, bh = b1, b2, b3, b4
-        cairo_draw_bounding_highlight(ctx, bx, by, bw, bh)
+    for bx1, by1, bx2, by2 in _parse_boxes(args):
+        cairo_draw_bounding_highlight(ctx, bx1, by1, max(1.0, bx2 - bx1), max(1.0, by2 - by1))
 
     final_arrows: List[Dict[str, Any]] = []
+    unresolved_collisions = 0
+    badge_r_check = 18.0
 
     if args.auto:
         targets_to_place: List[Dict[str, Any]] = []
@@ -633,7 +705,15 @@ def _cmd_annotate_cairo(
                 "[WARNING] --auto specified, but no target boxes found in layout sidecar (.layout.json) or --target flags. No auto arrows were placed."
             )
 
+        for t_box in targets_to_place:
+            obstacles.append(t_box)
+
         for target in targets_to_place:
+            if getattr(args, "draw_target_boxes", False):
+                tx1, ty1 = min(target["x1"], target["x2"]), min(target["y1"], target["y2"])
+                tx2, ty2 = max(target["x1"], target["x2"]), max(target["y1"], target["y2"])
+                cairo_draw_bounding_highlight(ctx, tx1, ty1, max(1.0, tx2 - tx1), max(1.0, ty2 - ty1))
+
             lbl = str(target.get("label") or len(final_arrows) + 1)
             ax1, ay1, ax2, ay2 = find_optimal_arrow_placement(
                 target,
@@ -644,6 +724,14 @@ def _cmd_annotate_cairo(
                 stroke_width=args.stroke_width,
                 grid_snap=getattr(args, "grid_snap", 10),
             )
+            still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
+                ax1, ay1, ax2, ay2, badge_r_check, obstacles, target_box=target
+            )
+            if still_collides:
+                unresolved_collisions += 1
+                print(
+                    f"[WARNING] Auto arrow '{lbl}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
+                )
             cairo_draw_badge_and_arrow(ctx, ax1, ay1, ax2, ay2, lbl)
             obstacles.append(
                 {
@@ -654,7 +742,15 @@ def _cmd_annotate_cairo(
                 }
             )
             final_arrows.append(
-                {"x1": ax1, "y1": ay1, "x2": ax2, "y2": ay2, "label": lbl, "auto": True}
+                {
+                    "x1": ax1,
+                    "y1": ay1,
+                    "x2": ax2,
+                    "y2": ay2,
+                    "label": lbl,
+                    "auto": True,
+                    "collided": still_collides,
+                }
             )
 
     for arrow_spec in args.arrow or []:
@@ -666,15 +762,8 @@ def _cmd_annotate_cairo(
         ax1, ay1, ax2, ay2 = map(float, parts[:4])
         label = parts[4] if len(parts) == 5 else ""
 
-        collided = False
         badge_r = max(20, int(args.stroke_width * 2.5))
-        for obs in obstacles:
-            if circle_intersects_rect(ax1, ay1, badge_r, obs["x1"], obs["y1"], obs["x2"], obs["y2"]):
-                collided = True
-                break
-            if rect_intersects_segment(obs["x1"], obs["y1"], obs["x2"], obs["y2"], ax1, ay1, ax2, ay2):
-                collided = True
-                break
+        collided = _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles)
 
         if collided and not args.allow_overlap:
             snap = getattr(args, "grid_snap", 10) or 10
@@ -688,15 +777,7 @@ def _cmd_annotate_cairo(
                 test_x1, test_y1 = ax1 + dx, ay1 + dy
                 if not (badge_r <= test_x1 <= width - badge_r and badge_r <= test_y1 <= height - badge_r):
                     continue
-                nudge_collided = False
-                for obs in obstacles:
-                    if circle_intersects_rect(test_x1, test_y1, badge_r + 4, obs["x1"], obs["y1"], obs["x2"], obs["y2"]):
-                        nudge_collided = True
-                        break
-                    if rect_intersects_segment(obs["x1"], obs["y1"], obs["x2"], obs["y2"], test_x1, test_y1, ax2, ay2):
-                        nudge_collided = True
-                        break
-                if not nudge_collided:
+                if not _arrow_hits_obstacles(test_x1, test_y1, ax2, ay2, badge_r + 4, obstacles):
                     resolved_nudge = (test_x1, test_y1)
                     break
 
@@ -711,7 +792,7 @@ def _cmd_annotate_cairo(
                     "x1": ax2 - 10,
                     "y1": ay2 - 10,
                     "x2": ax2 + 10,
-                    "y2": ax2 + 10,
+                    "y2": ay2 + 10,
                 }
                 new_x1, new_y1, new_x2, new_y2 = find_optimal_arrow_placement(
                     fake_target,
@@ -727,6 +808,15 @@ def _cmd_annotate_cairo(
                 )
                 ax1, ay1, ax2, ay2 = new_x1, new_y1, new_x2, new_y2
 
+        still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
+            ax1, ay1, ax2, ay2, badge_r_check, obstacles
+        )
+        if still_collides:
+            unresolved_collisions += 1
+            print(
+                f"[WARNING] Arrow '{label}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
+            )
+
         cairo_draw_badge_and_arrow(ctx, ax1, ay1, ax2, ay2, label)
         obstacles.append(
             {
@@ -737,13 +827,30 @@ def _cmd_annotate_cairo(
             }
         )
         final_arrows.append(
-            {"x1": ax1, "y1": ay1, "x2": ax2, "y2": ay2, "label": label, "auto": False}
+            {
+                "x1": ax1,
+                "y1": ay1,
+                "x2": ax2,
+                "y2": ay2,
+                "label": label,
+                "auto": False,
+                "collided": still_collides,
+            }
         )
 
     surface.write_to_png(out_path)
     arrows_audit = f"{os.path.splitext(out_path)[0]}.arrows.json"
     with open(arrows_audit, "w", encoding="utf-8") as f:
-        json.dump({"image": out_path, "arrows": final_arrows, "engine": "cairo"}, f, indent=2)
+        json.dump(
+            {
+                "image": out_path,
+                "engine": "cairo",
+                "unresolved_collisions": unresolved_collisions,
+                "arrows": final_arrows,
+            },
+            f,
+            indent=2,
+        )
 
     print(f"[OK] Annotated screenshot saved via Cairo to: {out_path}")
     print(f"[OK] Arrow coordinate audit saved to: {arrows_audit}")
@@ -801,15 +908,13 @@ def cmd_annotate(args: argparse.Namespace) -> None:
             dense_obstacles = detect_image_dense_obstacles(img)
             obstacles.extend(dense_obstacles)
 
-        for box_spec in args.box or []:
-            parts = [p.strip() for p in box_spec.split(",")]
-            if len(parts) != 4:
-                raise ValueError(f"Invalid --box format '{box_spec}'. Expected 'x1,y1,x2,y2'.")
-            bx1, by1, bx2, by2 = map(float, parts)
+        for bx1, by1, bx2, by2 in _parse_boxes(args):
             draw.rectangle([bx1 - 2, by1 - 2, bx2 + 2, by2 + 2], outline=(255, 255, 255), width=7)
             draw.rectangle([bx1, by1, bx2, by2], outline=(230, 30, 40), width=4)
 
         final_arrows: List[Dict[str, Any]] = []
+        unresolved_collisions = 0
+        badge_r_check = max(20, int(args.stroke_width * 2.5))
 
         if args.auto:
             targets_to_place: List[Dict[str, Any]] = []
@@ -834,7 +939,16 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                     "[WARNING] --auto specified, but no target boxes found in layout sidecar (.layout.json) or --target flags. No auto arrows were placed."
                 )
 
+            for t_box in targets_to_place:
+                obstacles.append(t_box)
+
             for target in targets_to_place:
+                if getattr(args, "draw_target_boxes", False):
+                    tx1, ty1 = min(target["x1"], target["x2"]), min(target["y1"], target["y2"])
+                    tx2, ty2 = max(target["x1"], target["x2"]), max(target["y1"], target["y2"])
+                    draw.rectangle([tx1 - 2, ty1 - 2, tx2 + 2, ty2 + 2], outline=(255, 255, 255), width=7)
+                    draw.rectangle([tx1, ty1, tx2, ty2], outline=(230, 30, 40), width=4)
+
                 lbl = str(target.get("label") or len(final_arrows) + 1)
                 ax1, ay1, ax2, ay2 = find_optimal_arrow_placement(
                     target,
@@ -845,6 +959,14 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                     stroke_width=args.stroke_width,
                     grid_snap=getattr(args, "grid_snap", 10),
                 )
+                still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
+                    ax1, ay1, ax2, ay2, badge_r_check, obstacles, target_box=target
+                )
+                if still_collides:
+                    unresolved_collisions += 1
+                    print(
+                        f"[WARNING] Auto arrow '{lbl}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
+                    )
                 _draw_arrow_with_callout(
                     draw, ax1, ay1, ax2, ay2, label=lbl, width=args.stroke_width
                 )
@@ -857,7 +979,15 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                     }
                 )
                 final_arrows.append(
-                    {"x1": ax1, "y1": ay1, "x2": ax2, "y2": ay2, "label": lbl, "auto": True}
+                    {
+                        "x1": ax1,
+                        "y1": ay1,
+                        "x2": ax2,
+                        "y2": ay2,
+                        "label": lbl,
+                        "auto": True,
+                        "collided": still_collides,
+                    }
                 )
 
         for arrow_spec in args.arrow or []:
@@ -869,15 +999,8 @@ def cmd_annotate(args: argparse.Namespace) -> None:
             ax1, ay1, ax2, ay2 = map(float, parts[:4])
             label = parts[4] if len(parts) == 5 else ""
 
-            collided = False
             badge_r = max(20, int(args.stroke_width * 2.5))
-            for obs in obstacles:
-                if circle_intersects_rect(ax1, ay1, badge_r, obs["x1"], obs["y1"], obs["x2"], obs["y2"]):
-                    collided = True
-                    break
-                if rect_intersects_segment(obs["x1"], obs["y1"], obs["x2"], obs["y2"], ax1, ay1, ax2, ay2):
-                    collided = True
-                    break
+            collided = _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles)
 
             if collided and not args.allow_overlap:
                 snap = getattr(args, "grid_snap", 10) or 10
@@ -891,15 +1014,7 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                     test_x1, test_y1 = ax1 + dx, ay1 + dy
                     if not (badge_r <= test_x1 <= width - badge_r and badge_r <= test_y1 <= height - badge_r):
                         continue
-                    nudge_collided = False
-                    for obs in obstacles:
-                        if circle_intersects_rect(test_x1, test_y1, badge_r + 4, obs["x1"], obs["y1"], obs["x2"], obs["y2"]):
-                            nudge_collided = True
-                            break
-                        if rect_intersects_segment(obs["x1"], obs["y1"], obs["x2"], obs["y2"], test_x1, test_y1, ax2, ay2):
-                            nudge_collided = True
-                            break
-                    if not nudge_collided:
+                    if not _arrow_hits_obstacles(test_x1, test_y1, ax2, ay2, badge_r + 4, obstacles):
                         resolved_nudge = (test_x1, test_y1)
                         break
 
@@ -930,6 +1045,15 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                     )
                     ax1, ay1, ax2, ay2 = new_x1, new_y1, new_x2, new_y2
 
+            still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
+                ax1, ay1, ax2, ay2, badge_r_check, obstacles
+            )
+            if still_collides:
+                unresolved_collisions += 1
+                print(
+                    f"[WARNING] Arrow '{label}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
+                )
+
             _draw_arrow_with_callout(
                 draw, ax1, ay1, ax2, ay2, label=label, width=args.stroke_width
             )
@@ -942,14 +1066,31 @@ def cmd_annotate(args: argparse.Namespace) -> None:
                 }
             )
             final_arrows.append(
-                {"x1": ax1, "y1": ay1, "x2": ax2, "y2": ay2, "label": label, "auto": False}
+                {
+                    "x1": ax1,
+                    "y1": ay1,
+                    "x2": ax2,
+                    "y2": ay2,
+                    "label": label,
+                    "auto": False,
+                    "collided": still_collides,
+                }
             )
 
         img.save(out_path, quality=95)
 
         arrows_audit = f"{os.path.splitext(out_path)[0]}.arrows.json"
         with open(arrows_audit, "w", encoding="utf-8") as f:
-            json.dump({"image": out_path, "arrows": final_arrows}, f, indent=2)
+            json.dump(
+                {
+                    "image": out_path,
+                    "engine": "pillow",
+                    "unresolved_collisions": unresolved_collisions,
+                    "arrows": final_arrows,
+                },
+                f,
+                indent=2,
+            )
 
         print(f"[OK] Annotated screenshot saved to: {out_path}")
         print(f"[OK] Arrow coordinate audit saved to: {arrows_audit}")
@@ -1008,6 +1149,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manual target box 'x1,y1,x2,y2[,label]'. Can be specified multiple times.",
     )
     p_ann.add_argument(
+        "--draw-target-boxes",
+        action="store_true",
+        help="Draw dashed highlight boxes around --target elements when using --auto.",
+    )
+    p_ann.add_argument(
         "--arrow",
         action="append",
         help="Arrow spec 'x1,y1,x2,y2[,label]'. Can be specified multiple times.",
@@ -1016,6 +1162,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--box",
         action="append",
         help="Highlight box spec 'x1,y1,x2,y2'. Can be specified multiple times.",
+    )
+    p_ann.add_argument(
+        "--box-xywh",
+        action="append",
+        help="Highlight box spec 'x,y,w,h'. Can be specified multiple times.",
     )
     p_ann.add_argument("--stroke-width", type=int, default=8, help="Arrow line thickness (default: 8).")
     p_ann.add_argument(

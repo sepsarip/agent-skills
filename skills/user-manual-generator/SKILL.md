@@ -1,8 +1,10 @@
 ---
 name: user-manual-generator
-description: Generate end-user manual books (user guides / panduan pengguna) for web and desktop applications with working Table of Contents hyperlinks, high-DPI auto-captured screenshots, collision-free arrow annotations (avoiding text occlusion), chapter-based figure citations (Figure X.Y / Gambar X.Y), concise bullet points, Roman front-matter numbering, and page numbers in Markdown (.md) and Word (.docx) formats. Supports task resume, feature gap analysis, legacy import, and non-destructive updates.
+description: Generate end-user manual books (user guides / panduan pengguna) for web and desktop applications with working Table of Contents hyperlinks, high-DPI auto-captured screenshots, collision-free arrow annotations (avoiding text occlusion), chapter-based figure citations (Figure X.Y / Gambar X.Y), concise bullet points, Roman front-matter numbering, and page numbers in Markdown (.md), Word (.docx), and official PDF (.pdf) formats. Supports task resume, feature gap analysis, legacy import, and non-destructive updates. Do not use for developer API reference documentation, source-code architecture diagrams, or automated video recording.
 license: MIT
-compatibility: Requires Python 3.9+, Pillow or PyCairo (cairo), python-docx or LibreOffice, playwright (chromium) or Browser MCP, and pypdf. LibreOffice for automated PDF rendering and official PDF export.
+compatibility: Requires Python 3.9+ stdlib for .md and .docx generation; Pillow or PyCairo (cairo) for annotations; playwright or Browser MCP for live captures; LibreOffice + (pypdf or pdftotext) for automated 2-pass PDF page resolution and official PDF export.
+metadata:
+  version: "0.1.0"
 ---
 
 # App Manual Generator
@@ -29,9 +31,9 @@ python3 scripts/check_env.py
 ### Execution & Environment Modes
 1. **Sandboxed First**: Run all commands inside Standard Sandbox Mode (`BypassSandbox: false`).
 2. **Offline & Zero-Dependency Core**:
-   - Compiling Markdown user manuals (`build_manual.py --format md`) and running Gap Analysis (`manual_state.py coverage`) use **100% Python Standard Library**. They run immediately without any internet connection, virtual environments, or `pip` installations.
-   - Word (`.docx`) manual generation automatically falls back to headless LibreOffice (`soffice`) if `python-docx` is not installed, and automatically invokes `embed_images.py` to embed media into the `.docx` archive.
-   - Image annotations support both **Pillow** and **PyCairo** (`cairo`). If Pillow is missing, PyCairo is used automatically for anti-aliased arrows, badges, and rounded dashed boxes.
+   - Compiling Markdown (`.md`), multi-section Word (`.docx` via `build_docx_stdlib_oxml`), and running Gap Analysis (`manual_state.py coverage`) use **100% Python Standard Library**. They run immediately without any internet connection, virtual environments, or `pip` installations.
+   - When headless LibreOffice (`soffice`) and either `pypdf` or `pdftotext` are available, `build_manual.py` runs a full 2-pass PDF compilation to populate exact section page numbers in the `.docx` Table of Contents alongside dynamic `PAGEREF` fields.
+   - Image annotations support both **Pillow** and **PyCairo** (`cairo`), both equipped with automatic pixel-contrast text obstacle detection so badges and arrows avoid UI text even without a `.layout.json` sidecar.
    - Web application screenshots can be captured via Browser MCP tools (Playwright MCP / Chrome DevTools) or placed directly into `docs/manual_book/assets/raw/`.
 3. **Local Virtual Environment (When pip & internet are available)**:
    If full Playwright auto-capture and Pillow image annotations are desired and an internet connection is available:
@@ -46,7 +48,16 @@ python3 scripts/check_env.py
 
 ## Core Workflow
 
-Follow this six-step lifecycle to create or maintain a manual book.
+Copy and track progress using this checklist:
+
+```markdown
+- [ ] Step 0: Verify environment readiness (scripts/check_env.py)
+- [ ] Step 1: Check project state or resume point (scripts/manual_state.py status)
+- [ ] Step 2: Plan chapter outline or run feature gap analysis (scripts/manual_state.py coverage)
+- [ ] Step 3: Capture high-DPI screenshots and layout maps (scripts/capture_and_annotate.py capture)
+- [ ] Step 4: Annotate screenshots and visually verify (scripts/capture_and_annotate.py annotate --auto)
+- [ ] Step 5: Renumber citations, compile outputs, and verify (scripts/build_manual.py --verify)
+```
 
 ```mermaid
 flowchart TD
@@ -147,52 +158,72 @@ For desktop software or pre-captured screenshots:
    ```
 
 #### Precision Coordinate Extraction via Playwright MCP
-When interacting with active web applications inside an agent session, use Playwright MCP tools to navigate, extract exact element geometries, and take clean screenshots:
+When interacting with active web applications inside an agent session, use Playwright MCP tools to navigate, lock scroll position, extract exact text & target geometries into `<screen_name>.layout.json`, and capture clean screenshots:
 
 1. **Navigate**: Call `browser_navigate` with the target page URL (e.g. `http://localhost:3000/dashboard`).
-2. **Extract Coordinates with `browser_evaluate`**: Run a client-side JavaScript snippet to obtain pixel-accurate bounding rects for buttons, input fields, tables, or modals:
+2. **Lock Scroll & Extract Layout Sidecar with `browser_evaluate`**: Keep the exact same scroll position (`window.scrollTo(0, 0)`) before evaluating and before `browser_take_screenshot` so bounding boxes never drift vertically. Save the returned JSON object to `docs/manual_book/assets/raw/<screen_name>.layout.json`:
    ```javascript
    () => {
-     const selectors = {
-       "1": "input[name='email']",
-       "2": "input[name='password']",
-       "3": "button[type='submit']"
-     };
-     const results = {};
-     for (const [id, sel] of Object.entries(selectors)) {
-       const el = document.querySelector(sel);
-       if (el) {
-         const r = el.getBoundingClientRect();
-         results[id] = {
-           box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
-           center: [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)],
-           top: [Math.round(r.left + r.width / 2), Math.round(r.top)],
-           bottom: [Math.round(r.left + r.width / 2), Math.round(r.bottom)],
-           left: [Math.round(r.left), Math.round(r.top + r.height / 2)],
-           right: [Math.round(r.right), Math.round(r.top + r.height / 2)]
-         };
+     window.scrollTo(0, 0);
+     const scale = window.devicePixelRatio || 1;
+     const selectors = [
+       ["1", "input[name='email']"],
+       ["2", "input[name='password']"],
+       ["3", "button[type='submit']"]
+     ];
+     const text_rects = [];
+     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+     while (walker.nextNode()) {
+       const node = walker.currentNode;
+       if (!node.textContent || !node.textContent.trim()) continue;
+       const el = node.parentElement;
+       if (!el) continue;
+       const st = window.getComputedStyle(el);
+       if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") continue;
+       const range = document.createRange();
+       range.selectNodeContents(node);
+       for (const r of range.getClientRects()) {
+         if (r.width > 2 && r.height > 2) {
+           text_rects.push({
+             x1: Math.round(r.left * scale), y1: Math.round(r.top * scale),
+             x2: Math.round(r.right * scale), y2: Math.round(r.bottom * scale),
+             text: node.textContent.trim().slice(0, 30)
+           });
+         }
        }
      }
-     return results;
+     const target_boxes = [];
+     for (const [label, selector] of selectors) {
+       const el = document.querySelector(selector);
+       if (!el) continue;
+       const r = el.getBoundingClientRect();
+       target_boxes.push({
+         label, selector,
+         x1: Math.round(r.left * scale), y1: Math.round(r.top * scale),
+         x2: Math.round(r.right * scale), y2: Math.round(r.bottom * scale)
+       });
+     }
+     return { scale, text_rects, target_boxes };
    }
    ```
-3. **Capture Screenshot**: Call `browser_take_screenshot` and save the clean image to `docs/manual_book/assets/raw/<screen_name>.png`.
-4. **Annotate**: Pass the evaluated coordinates directly to `scripts/annotate_cairo.py` or `scripts/capture_and_annotate.py`.
+3. **Capture Screenshot**: Without scrolling, call `browser_take_screenshot` and save the clean image to `docs/manual_book/assets/raw/<screen_name>.png`. Verify whether the saved PNG dimensions match CSS viewport (`scale = 1`) or physical pixels (`scale = devicePixelRatio`), and adjust `scale` accordingly if needed.
+4. **Annotate**: Run `scripts/capture_and_annotate.py annotate --auto --draw-target-boxes` (which automatically reads `<screen_name>.layout.json`), or pass `--box-coords` (`x1,y1,x2,y2`) / `--box` (`x,y,w,h`) to `scripts/annotate_cairo.py`.
 
 ---
 
 ### Step 4: Collision-Free Arrow Annotation & Dual-Engine Support
 
-Never occlude text labels or button captions with arrows. The annotation suite supports two interchangeable engines:
+Never occlude text labels, headings, or button captions with arrows or dashed boxes. Both engines automatically detect pixel-contrast text obstacles when `.layout.json` is absent:
 - **Pillow (`PIL`)**: Raster-based drawing with adaptive text obstacle detection.
-- **PyCairo (`cairo`)**: Vector-based rendering with gradient/shadowed arrows, high-contrast white outlines, numbered circle badges, and rounded dashed bounding boxes.
+- **PyCairo (`cairo`)**: Vector-based rendering with shadowed arrows, high-contrast white outlines, numbered circle badges, and rounded dashed bounding boxes.
 
 #### Running via `capture_and_annotate.py` (Unified CLI)
-`capture_and_annotate.py` automatically detects available libraries and defaults to Pillow or PyCairo seamlessly:
+`capture_and_annotate.py` automatically detects available libraries and defaults to Pillow or PyCairo seamlessly (`--box` always takes `x1,y1,x2,y2`; use `--box-xywh` for `x,y,w,h`):
 
 ```bash
 python3 scripts/capture_and_annotate.py annotate \
   --auto \
+  --draw-target-boxes \
   --engine auto \
   --grid-snap 10 \
   --input "docs/manual_book/assets/raw/login_screen.png" \
@@ -200,7 +231,7 @@ python3 scripts/capture_and_annotate.py annotate \
 ```
 
 #### Running via `annotate_cairo.py` (Direct PyCairo Engine)
-For standalone PyCairo execution or scripting custom batches (like in headless Linux servers without Pillow):
+For standalone PyCairo execution (`--box` takes `x,y,w,h`; `--box-coords` takes `x1,y1,x2,y2`):
 
 ```bash
 python3 scripts/annotate_cairo.py \
@@ -210,12 +241,7 @@ python3 scripts/annotate_cairo.py \
   --arrow "1177,240,1177,296,1"
 ```
 
-- **Shadow & Glow Styling**: Arrows include a subtle directional shadow (`rgba(0,0,0,0.25)`) and a 1.5px white outline to ensure legibility across dark and light UI themes.
-- **Rounded Dashed Bounding Boxes**: Element highlights use a 6px corner radius and `[6.0, 4.0]` dash pattern.
-- **Compact Arrow Lengths**: Arrows use compact lengths (45–140 px, favoring the shortest clear distance).
-- **Guide Grid Snapping**: The `--grid-snap` flag (default 10 px) aligns arrow tail and badge coordinates to clean grid intersections.
-- **Local Grid-Nudge Anti-Collision**: When manual coordinates collide with text or controls, the annotator nudges the arrow along the grid to the nearest clear adjacent whitespace.
-- **Visual Verification**: Inspect `docs/manual_book/assets/final/login_screen.png`. Once verified, mark the figure in the progress tracker:
+- **Mandatory Visual Inspection Before `--verified`**: Open and inspect **every** annotated image one by one (e.g. via `read_file` or an image viewer) to verify: (1) zero badges, arrowheads, or dashed lines cover headings/labels, (2) dashed boxes frame the target cleanly without slicing adjacent text, and (3) badge numbers flow logically top-to-bottom. Never batch-mark figures in a blind loop. `manual_state.py mark --verified` also checks `<image>.arrows.json` and rejects figures with `unresolved_collisions > 0`:
   ```bash
   python3 scripts/manual_state.py mark \
     --progress "docs/manual_book/manual_progress.json" \
@@ -244,27 +270,19 @@ python3 scripts/annotate_cairo.py \
    ```
 
 ### Output Layout, A4 Paper Standards & Centering Rules
-- **A4 Standard Dimensions & Margins**: Word documents are formatted to standard A4 (210mm x 297mm / 8.27" x 11.69") with standard 1.0-inch (2.54 cm / 1440 dxa) margins across all sections, and 0.5-inch (1.27 cm / 720 dxa) header/footer distance. Headers are clean blank whitespace.
-- **Image Bounding & Centering**:
-  - Images are dynamically scaled to a maximum of 5.8 inches in width and 5.2 inches in height, strictly preventing images from exceeding A4 page borders or pushing captions onto separate pages.
-  - **Align Center**: Both the image and the image citation/caption (*Gambar X.Y: Judul* / *Figure X.Y: Title*) are aligned to the center (`align center`) in both Markdown (`<div align="center">`) and Word (`WD_ALIGN_PARAGRAPH.CENTER`) formats.
-- **Format Selection & Zero-Crash Fallback**:
+- **A4 Standard Dimensions & Margins**: Word documents are formatted to standard A4 (210mm x 297mm / 8.27" x 11.69" / `11906 x 16838 dxa`) with 1.0-inch (`1440 dxa`) margins across all 3 sections and 0.5-inch (`720 dxa`) header/footer distance.
+- **Image Bounding, Framing & Anti-Orphan Pagination**:
+  - Chapter screenshots are scaled proportionally (up to 5.4" wide x 3.4" high in DOCX; helper cap 5.8" x 5.2") with a subtle `#CBD5E1` border so white UI cards stand out cleanly and headings + screenshot + caption + bullet points fit together without orphaned trailing lines.
+  - Both the image and the figure caption (*Gambar X.Y: Judul* / *Figure X.Y: Title*) are center-aligned with `keepNext` chains linking section headings, images, captions, and bullets.
+- **Format Selection & Native OpenXML Builder**:
   - `--format md`: Generates Markdown only (zero external dependencies).
-  - `--format all` / `--format docx`: Uses `python-docx` if installed, or automatically falls back to headless LibreOffice (`soffice`) without crashing if `python-docx` is missing.
-  - `--format pdf` / `--export-pdf`: Generates an official publication-ready PDF using sandboxed LibreOffice with isolated temporary profiles (`-env:UserInstallation=file:///tmp/lo_prof_*`).
-- **DOCX Media Auto-Embedding (`embed_images.py`)**:
-  - When compiling DOCX via LibreOffice fallback, `build_manual.py` automatically executes `embed_images.py`.
-  - Converts external relationship links (`r:link` with `TargetMode="External"`) into internal embedded media (`r:embed` inside `word/media/`), producing 100% self-contained Word archives that display images reliably when transferred across computers.
-  - Automatically constrains image dimensions (`<wp:extent>` and `<a:ext>`) proportionally so they never exceed A4 margin boundaries (5.8 inches wide, 5.2 inches high).
-- **Cover Page (1 Full Page)**: Contains the title, subtitle, version, update date, and a prominent logo placeholder (`[ LOGO APLIKASI ]` or custom `"logo_path"`). Has no page number footer and ends with a strict page break.
-- **Table of Contents (Page 2)**: Numbered with lowercase Roman numerals (`i`, `ii`...). List of Figures (Daftar Gambar) is omitted. Followed by a strict page break so Chapter 1 begins on a brand new page.
-- **Main Chapters (Page 3+: 1..N)**: Chapter 1 begins on a fresh page immediately after the Table of Contents. Each subsequent Chapter begins on a new page.
-- **Justified Text Alignment**: All narrative body paragraphs and step-by-step bullet points are formatted as justified (rata kiri-kanan) in Markdown, Word, and PDF.
-- **True Bold Formatting**: Bold text wrapped in `**text**` is converted to native bold runs in Word and PDF without leaving raw asterisks.
-- **Markdown (`.md`)**: TOC uses pure clickable anchor links without page numbers. Footers display `*X*`.
-- **Word (`.docx`)**: Every entry in Table of Contents contains a clickable hyperlink, right-aligned dot leader tab aligned to the printable margin boundary (9029 dxa / 6.27 inches for A4), and dynamic `PAGEREF` fields. Footers display `*X*` right-aligned.
-- **Official PDF (`.pdf`)**: Converted directly from `.docx` via headless LibreOffice with internal bookmarks and table of contents preserved.
-- **Non-Destructive Archiving**: Previous outputs are automatically archived to `docs/manual_book/archive/<basename>_<timestamp>/` before rebuilding.
+  - `--format all` / `--format docx`: Uses `python-docx` if installed, or builds a native multi-section ECMA-376 OpenXML `.docx` (`build_docx_stdlib_oxml`) using 100% Python stdlib with embedded `word/media/` images.
+  - `--format pdf` / `--export-pdf`: Renders an official PDF via sandboxed headless LibreOffice (`-env:UserInstallation=file:///tmp/lo_prof_*`), using `pypdf` or `pdftotext` in Pass 2 to populate exact section page numbers in the TOC.
+- **3-Section Pagination Hierarchy**:
+  - **Cover Page (Section 1)**: Centered logo or `[ APPLICATION LOGO ]` / `[ LOGO APLIKASI ]` box, wrapped 26pt bold title, subtitle, metadata rule, and **no page number**.
+  - **Table of Contents (Section 2)**: Lowercase Roman numerals (`i`, `ii`...), clickable internal hyperlinks, right-aligned dot leaders at `9026 dxa` (6.27"), `360 dxa` subsection indentation, and `PAGEREF` fields.
+  - **Main Chapters (Section 3)**: Arabic numerals starting at `1`, chapter page breaks, justified paragraphs and bullets, and native bold/italic/code runs.
+- **Non-Destructive Archiving**: Previous outputs are automatically archived to `<out_dir>/archive/<basename>_<timestamp>/` before rebuilding.
 
 ### Standard Directory Structure (`docs/manual_book/`)
 

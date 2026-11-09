@@ -1,6 +1,6 @@
 # User Manual Generator Skill
 
-> Generate end-user manual books (user guides / panduan pengguna) for web and desktop applications with working Table of Contents hyperlinks, high-DPI auto-captured screenshots, collision-free arrow annotations, chapter-based figure citations, and page-numbered outputs in Markdown (`.md`) and Microsoft Word (`.docx`).
+> Generate end-user manual books (user guides / panduan pengguna) for web and desktop applications with working Table of Contents hyperlinks, high-DPI auto-captured screenshots, collision-free arrow annotations, chapter-based figure citations, and page-numbered outputs in Markdown (`.md`), Microsoft Word (`.docx`), and official PDF (`.pdf`).
 
 ---
 
@@ -13,8 +13,8 @@ The **`user-manual-generator`** skill gives AI coding agents a structured, deter
 - **Task Continuation & Resume**: Tracks milestones in `manual_progress.json` and tells the agent the exact next command to run if interrupted.
 - **Feature Gap Analysis**: Compares codebase routes, pages, and menus against the manual to pinpoint missing, documented, or stale features.
 - **High-DPI Capture & Layout Mapping**: Automatically captures Retina-grade (`deviceScaleFactor=2`) screenshots and extracts element coordinates into layout sidecars.
-- **Collision-Free Arrow Annotations**: Intelligently routes arrows to element boundaries while placing tail badges in clear whitespace without occluding on-screen text.
-- **Standards-Compliant Word Output**: Adheres strictly to ECMA-376 OpenXML schema rules, producing clickable Table of Contents hyperlinks, dot leader tabs aligned to printable margins, Roman front-matter numerals, clean blank headers, standard 1.0-inch margins, and dynamic `PAGEREF` page numbers.
+- **Dual-Engine Collision-Free Arrow Annotations**: Intelligently routes arrows to element boundaries while placing tail badges in clear whitespace without occluding on-screen text (supports both Pillow and PyCairo).
+- **Standards-Compliant Word & PDF Output**: Adheres strictly to ECMA-376 OpenXML schema rules, producing clickable Table of Contents hyperlinks, dot leader tabs aligned to printable margins, self-contained embedded media (`word/media/`), Roman front-matter numerals, clean blank headers, standard 1.0-inch margins, dynamic `PAGEREF` page numbers, and official `.pdf` export.
 
 ---
 
@@ -28,11 +28,15 @@ skills/user-manual-generator/
 │   ├── copywriting-and-layout.md     # Copywriting guidelines, figure captions, and spec schema
 │   ├── maintenance-workflow.md       # Task continuation, feature discovery, and renumbering
 │   └── security-policy.md            # Security constraints, path validation, and subprocess safety
-└── scripts/
-    ├── check_env.py                  # Environment readiness and dependency checker
-    ├── manual_state.py               # State manager, resume tracker, coverage, and renumbering
-    ├── capture_and_annotate.py       # High-DPI capture, grid overlay, and collision-free annotator
-    └── build_manual.py               # Two-pass Markdown and OpenXML Word document compiler
+├── scripts/
+│   ├── check_env.py                  # Environment readiness and dependency checker
+│   ├── manual_state.py               # State manager, resume tracker, coverage, and renumbering
+│   ├── capture_and_annotate.py       # High-DPI capture, grid overlay, and collision-free annotator
+│   ├── annotate_cairo.py             # Direct PyCairo vector arrow, badge, and dashed box engine
+│   ├── embed_images.py               # OpenXML media embedder and A4 image dimension constrainer
+│   └── build_manual.py               # Two-pass Markdown, OpenXML Word, and official PDF compiler
+└── tests/
+    └── test_fixes.py                 # Automated unit and integration test suite
 ```
 
 ---
@@ -55,8 +59,9 @@ flowchart TD
 ## 🛠️ Requirements & Setup
 
 - **Core Capabilities (Offline / Zero-Dependency)**:
-  - **Python 3.9+** (Standard Library) runs Markdown manual generation (`--format md`) and Feature Gap Analysis with zero external packages.
-  - Word (`.docx`) manual generation works with either `python-docx` OR automatic headless LibreOffice (`soffice`) fallback.
+  - **Python 3.9+** (Standard Library) runs Markdown (`.md`) and ECMA-376 OpenXML Word (`.docx`) manual generation (with 3-section A4 pagination, Roman front matter, dot-leader TOC, and embedded media) plus Feature Gap Analysis with zero external pip packages.
+  - Official PDF (`.pdf`) export and 2-pass exact page numbering work with headless LibreOffice (`soffice`) and either `pypdf` or `pdftotext` (`poppler-utils`).
+  - Image annotations work with either `Pillow` (`PIL`) OR `PyCairo` (`cairo`).
   - Screenshots can be placed directly in `docs/manual_book/assets/raw/` or captured via Browser MCP tools.
   - All manual assets, specifications, states, and documents reside cleanly in `docs/manual_book/`.
 - **Full Suite Setup (When pip & internet are available)**:
