@@ -29,6 +29,7 @@ if _scripts_dir not in sys.path:
 from annotate_cairo import (
     HAVE_CAIRO,
     circle_intersects_rect,
+    compute_annotation_scale,
     detect_cairo_surface_obstacles,
     draw_badge_and_arrow as cairo_draw_badge_and_arrow,
     draw_bounding_highlight as cairo_draw_bounding_highlight,
@@ -486,8 +487,10 @@ def find_optimal_arrow_placement(
     center_x = (bx1 + bx2) / 2.0
     center_y = (by1 + by2) / 2.0
 
-    badge_radius = max(20, int(stroke_width * 2.5))
-    clearance = max(8, stroke_width + 4)
+    scale = compute_annotation_scale(img_width, img_height)
+    eff_stroke = max(stroke_width, int(round(stroke_width * scale)))
+    badge_radius = max(int(round(20 * scale)), int(eff_stroke * 2.5))
+    clearance = max(int(round(8 * scale)), eff_stroke + int(round(4 * scale)))
 
     preferred_angles = [
         math.pi,          # Left (180 deg)
@@ -508,8 +511,8 @@ def find_optimal_arrow_placement(
         math.pi * 0.25,
     ]
 
-    # Compact lengths: prioritize short, direct, readable arrows near element
-    candidate_lengths = [45, 65, 85, 110, 140]
+    # Compact lengths scaled to image resolution so arrows stay proportional on Retina captures
+    candidate_lengths = [int(round(L * scale)) for L in (45, 65, 85, 110, 140)]
 
     best_cand = None
     min_penalty = float("inf")
@@ -535,8 +538,8 @@ def find_optimal_arrow_placement(
             tx = x_at_edge
             ty = y_edge
 
-        head_x = tx + (cos_a * 4)
-        head_y = ty + (sin_a * 4)
+        head_x = tx + (cos_a * 4.0 * scale)
+        head_y = ty + (sin_a * 4.0 * scale)
 
         for length in candidate_lengths:
             raw_tail_x = head_x + (cos_a * length)
@@ -550,13 +553,13 @@ def find_optimal_arrow_placement(
                 tail_x = raw_tail_x
                 tail_y = raw_tail_y
 
-            margin = badge_radius + 8
+            margin = badge_radius + int(round(8 * scale))
             if not (margin <= tail_x <= img_width - margin and margin <= tail_y <= img_height - margin):
                 continue
             if not (8 <= head_x <= img_width - 8 and 8 <= head_y <= img_height - 8):
                 continue
 
-            if circle_intersects_rect(tail_x, tail_y, badge_radius + 4, bx1, by1, bx2, by2):
+            if circle_intersects_rect(tail_x, tail_y, badge_radius + 4 * scale, bx1, by1, bx2, by2):
                 continue
 
             has_badge_collision = False
@@ -589,7 +592,7 @@ def find_optimal_arrow_placement(
                     continue
                 # Ignore small pixel-density cells straddling the arrow tip on the target border
                 if (ox2 - ox1) <= 35 and (oy2 - oy1) <= 35:
-                    if (ox1 - 8) <= head_x <= (ox2 + 8) and (oy1 - 8) <= head_y <= (oy2 + 8):
+                    if (ox1 - 8 * scale) <= head_x <= (ox2 + 8 * scale) and (oy1 - 8 * scale) <= head_y <= (oy2 + 8 * scale):
                         continue
                 if rect_intersects_segment(
                     ox1, oy1, ox2, oy2,
@@ -612,17 +615,17 @@ def find_optimal_arrow_placement(
     if best_cand:
         return best_cand
 
-    # Compact fallback placement (55px instead of 150px)
-    fallback_len = 55.0
+    # Compact fallback placement scaled to image resolution
+    fallback_len = 55.0 * scale
     if center_x < img_width * 0.3:
         head_x = bx2
         head_y = center_y
-        tail_x = min(img_width - badge_radius - 10, head_x + fallback_len)
+        tail_x = min(img_width - badge_radius - 10 * scale, head_x + fallback_len)
         tail_y = head_y
     else:
         head_x = bx1
         head_y = center_y
-        tail_x = max(badge_radius + 10, head_x - fallback_len)
+        tail_x = max(badge_radius + 10 * scale, head_x - fallback_len)
         tail_y = head_y
 
     if grid_snap > 1:
@@ -643,16 +646,21 @@ def _draw_pillow_highlight_box(
     by2: float,
     color: Tuple[int, int, int] = (230, 30, 40),
     pad: float = 4.0,
+    scale: float = 1.0,
 ) -> None:
     """Draw a rounded highlight box with white contrast border using Pillow."""
-    outer = [bx1 - pad - 1, by1 - pad - 1, bx2 + pad + 1, by2 + pad + 1]
-    inner = [bx1 - pad, by1 - pad, bx2 + pad, by2 + pad]
+    scaled_pad = pad * scale
+    rad = max(2, int(round(6 * scale)))
+    w_outer = max(3, int(round(5 * scale)))
+    w_inner = max(2, int(round(3 * scale)))
+    outer = [bx1 - scaled_pad - 1, by1 - scaled_pad - 1, bx2 + scaled_pad + 1, by2 + scaled_pad + 1]
+    inner = [bx1 - scaled_pad, by1 - scaled_pad, bx2 + scaled_pad, by2 + scaled_pad]
     if hasattr(draw, "rounded_rectangle"):
-        draw.rounded_rectangle(outer, radius=6, outline=(255, 255, 255), width=5)
-        draw.rounded_rectangle(inner, radius=6, outline=color, width=3)
+        draw.rounded_rectangle(outer, radius=rad, outline=(255, 255, 255), width=w_outer)
+        draw.rounded_rectangle(inner, radius=rad, outline=color, width=w_inner)
     else:
-        draw.rectangle(outer, outline=(255, 255, 255), width=5)
-        draw.rectangle(inner, outline=color, width=3)
+        draw.rectangle(outer, outline=(255, 255, 255), width=w_outer)
+        draw.rectangle(inner, outline=color, width=w_inner)
 
 
 def _draw_arrow_with_callout(
@@ -796,6 +804,9 @@ def _resolve_annotations(
     final_arrows: List[Dict[str, Any]] = []
     unresolved_collisions = 0
     snap = getattr(args, "grid_snap", 10) or 10
+    scale = compute_annotation_scale(width, height)
+    obs_pad = 15.0 * scale
+    step_unit = max(snap, int(round(snap * scale)))
 
     if getattr(args, "auto", False):
         targets_to_place: List[Dict[str, Any]] = []
@@ -840,10 +851,10 @@ def _resolve_annotations(
                 )
             obstacles.append(
                 {
-                    "x1": min(ax1, ax2) - 15,
-                    "y1": min(ay1, ay2) - 15,
-                    "x2": max(ax1, ax2) + 15,
-                    "y2": max(ay1, ay2) + 15,
+                    "x1": min(ax1, ax2) - obs_pad,
+                    "y1": min(ay1, ay2) - obs_pad,
+                    "x2": max(ax1, ax2) + obs_pad,
+                    "y2": max(ay1, ay2) + obs_pad,
                 }
             )
             final_arrows.append(
@@ -867,19 +878,19 @@ def _resolve_annotations(
         ax1, ay1, ax2, ay2 = map(float, parts[:4])
         label = parts[4] if len(parts) == 5 else ""
 
-        badge_r = max(20, int(args.stroke_width * 2.5))
+        badge_r = max(int(round(20 * scale)), int(round(args.stroke_width * 2.5 * scale)))
         if _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles) and not args.allow_overlap:
             nudge_offsets = [
-                (0, -snap), (0, snap), (-snap, 0), (snap, 0),
-                (-snap, -snap), (snap, -snap), (-snap, snap), (snap, snap),
-                (0, -2 * snap), (0, 2 * snap), (-2 * snap, 0), (2 * snap, 0),
+                (0, -step_unit), (0, step_unit), (-step_unit, 0), (step_unit, 0),
+                (-step_unit, -step_unit), (step_unit, -step_unit), (-step_unit, step_unit), (step_unit, step_unit),
+                (0, -2 * step_unit), (0, 2 * step_unit), (-2 * step_unit, 0), (2 * step_unit, 0),
             ]
             resolved_nudge = None
             for dx, dy in nudge_offsets:
                 test_x1, test_y1 = ax1 + dx, ay1 + dy
                 if not (badge_r <= test_x1 <= width - badge_r and badge_r <= test_y1 <= height - badge_r):
                     continue
-                if not _arrow_hits_obstacles(test_x1, test_y1, ax2, ay2, badge_r + 4, obstacles):
+                if not _arrow_hits_obstacles(test_x1, test_y1, ax2, ay2, badge_r + 4 * scale, obstacles):
                     resolved_nudge = (test_x1, test_y1)
                     break
 
@@ -891,10 +902,10 @@ def _resolve_annotations(
                 ax1, ay1 = new_x1, new_y1
             else:
                 fake_target = {
-                    "x1": ax2 - 10,
-                    "y1": ay2 - 10,
-                    "x2": ax2 + 10,
-                    "y2": ay2 + 10,
+                    "x1": ax2 - 10 * scale,
+                    "y1": ay2 - 10 * scale,
+                    "x2": ax2 + 10 * scale,
+                    "y2": ay2 + 10 * scale,
                 }
                 new_x1, new_y1, new_x2, new_y2 = find_optimal_arrow_placement(
                     fake_target,
@@ -921,10 +932,10 @@ def _resolve_annotations(
 
         obstacles.append(
             {
-                "x1": min(ax1, ax2) - 15,
-                "y1": min(ay1, ay2) - 15,
-                "x2": max(ax1, ax2) + 15,
-                "y2": max(ay1, ay2) + 15,
+                "x1": min(ax1, ax2) - obs_pad,
+                "y1": min(ay1, ay2) - obs_pad,
+                "x2": max(ax1, ax2) + obs_pad,
+                "y2": max(ay1, ay2) + obs_pad,
             }
         )
         final_arrows.append(
@@ -1012,6 +1023,7 @@ def _annotate_single_image(args: argparse.Namespace, in_raw: str, out_raw: str) 
     if resolved_engine == "cairo":
         surface = cairo.ImageSurface.create_from_png(in_path)
         width, height = surface.get_width(), surface.get_height()
+        scale = compute_annotation_scale(width, height)
         ctx = cairo.Context(surface)
         obstacles = (
             list(layout_data["text_rects"])
@@ -1019,33 +1031,39 @@ def _annotate_single_image(args: argparse.Namespace, in_raw: str, out_raw: str) 
             else detect_cairo_surface_obstacles(surface)
         )
         boxes_to_draw, final_arrows, unresolved = _resolve_annotations(
-            args, width, height, obstacles, layout_data, badge_r_check=18.0
+            args, width, height, obstacles, layout_data, badge_r_check=18.0 * scale
         )
         for bx1, by1, bx2, by2 in boxes_to_draw:
-            cairo_draw_bounding_highlight(ctx, bx1, by1, max(1.0, bx2 - bx1), max(1.0, by2 - by1))
+            cairo_draw_bounding_highlight(
+                ctx, bx1, by1, max(1.0, bx2 - bx1), max(1.0, by2 - by1), scale=scale
+            )
         for arr in final_arrows:
-            cairo_draw_badge_and_arrow(ctx, arr["x1"], arr["y1"], arr["x2"], arr["y2"], arr["label"])
+            cairo_draw_badge_and_arrow(
+                ctx, arr["x1"], arr["y1"], arr["x2"], arr["y2"], arr["label"], scale=scale
+            )
         surface.write_to_png(out_path)
         _write_arrows_audit(out_path, "cairo", unresolved, final_arrows)
         return
 
     with Image.open(in_path).convert("RGB") as img:
         width, height = img.size
+        scale = compute_annotation_scale(width, height)
+        eff_stroke = max(args.stroke_width, int(round(args.stroke_width * scale)))
         draw = ImageDraw.Draw(img)
         obstacles = (
             list(layout_data["text_rects"])
             if layout_data and layout_data.get("text_rects")
             else detect_image_dense_obstacles(img)
         )
-        badge_r_check = max(20, int(args.stroke_width * 2.5))
+        badge_r_check = max(int(round(20 * scale)), int(eff_stroke * 2.5))
         boxes_to_draw, final_arrows, unresolved = _resolve_annotations(
             args, width, height, obstacles, layout_data, badge_r_check=badge_r_check
         )
         for bx1, by1, bx2, by2 in boxes_to_draw:
-            _draw_pillow_highlight_box(draw, bx1, by1, bx2, by2)
+            _draw_pillow_highlight_box(draw, bx1, by1, bx2, by2, scale=scale)
         for arr in final_arrows:
             _draw_arrow_with_callout(
-                draw, arr["x1"], arr["y1"], arr["x2"], arr["y2"], label=arr["label"], width=args.stroke_width
+                draw, arr["x1"], arr["y1"], arr["x2"], arr["y2"], label=arr["label"], width=eff_stroke
             )
         img.save(out_path, quality=95)
         _write_arrows_audit(out_path, "pillow", unresolved, final_arrows)

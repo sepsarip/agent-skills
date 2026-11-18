@@ -155,6 +155,11 @@ _circle_intersects_rect = circle_intersects_rect
 _rect_intersects_segment = rect_intersects_segment
 
 
+def compute_annotation_scale(width: int, height: int) -> float:
+    """Compute proportional scale factor relative to a 1100x850 baseline image."""
+    return max(1.0, max(width / 1100.0, height / 850.0))
+
+
 def _obs_near_point(obs: Dict[str, float], px: float, py: float, tol: float = 14.0) -> bool:
     return (obs["x1"] - tol) <= px <= (obs["x2"] + tol) and (obs["y1"] - tol) <= py <= (obs["y2"] + tol)
 
@@ -168,12 +173,14 @@ def draw_badge_and_arrow(
     number_str: str,
     color: Tuple[float, float, float] = (0.145, 0.388, 0.922),
     badge_radius: float = 16.0,
+    scale: float = 1.0,
 ) -> None:
     """
     badge_x, badge_y: center of the circular badge.
     target_x, target_y: point where the arrow tip lands.
     number_str: text inside badge ('1', '2', etc.).
     color: RGB tuple (0.0 .. 1.0).
+    scale: resolution-aware multiplier (1.0 at <=1100x850, ~2.6 at 2880x1800).
     """
     dx = target_x - badge_x
     dy = target_y - badge_y
@@ -183,31 +190,36 @@ def draw_badge_and_arrow(
 
     ux = dx / dist
     uy = dy / dist
+    r = badge_radius * scale if badge_radius == 16.0 else badge_radius
 
-    start_x = badge_x + ux * badge_radius
-    start_y = badge_y + uy * badge_radius
+    if dist < r + 4.0 * scale:
+        start_x, start_y = badge_x, badge_y
+    else:
+        start_x = badge_x + ux * r
+        start_y = badge_y + uy * r
 
-    arrow_len = 13.0
-    arrow_half_w = 5.5
+    arrow_len = 13.0 * scale
+    arrow_half_w = 5.5 * scale
     base_x = target_x - ux * arrow_len
     base_y = target_y - uy * arrow_len
     shaft_end_x = target_x - ux * (arrow_len * 0.75)
     shaft_end_y = target_y - uy * (arrow_len * 0.75)
+    shadow_off = 1.5 * scale
 
     # 1. Draw Arrow Line Shadow
     ctx.save()
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.set_line_width(5.0)
+    ctx.set_line_width(5.0 * scale)
     ctx.set_source_rgba(0.0, 0.0, 0.0, 0.25)
-    ctx.move_to(start_x + 1.5, start_y + 1.5)
-    ctx.line_to(shaft_end_x + 1.5, shaft_end_y + 1.5)
+    ctx.move_to(start_x + shadow_off, start_y + shadow_off)
+    ctx.line_to(shaft_end_x + shadow_off, shaft_end_y + shadow_off)
     ctx.stroke()
     ctx.restore()
 
     # 2. Draw Arrow Line White Glow / Outline
     ctx.save()
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.set_line_width(4.5)
+    ctx.set_line_width(4.5 * scale)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.move_to(start_x, start_y)
     ctx.line_to(shaft_end_x, shaft_end_y)
@@ -217,7 +229,7 @@ def draw_badge_and_arrow(
     # 3. Draw Arrow Line Main Color
     ctx.save()
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.set_line_width(2.5)
+    ctx.set_line_width(2.5 * scale)
     ctx.set_source_rgb(*color)
     ctx.move_to(start_x, start_y)
     ctx.line_to(shaft_end_x, shaft_end_y)
@@ -235,7 +247,7 @@ def draw_badge_and_arrow(
 
     ctx.save()
     ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-    ctx.set_line_width(1.5)
+    ctx.set_line_width(1.5 * scale)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.move_to(target_x, target_y)
     ctx.line_to(left_x, left_y)
@@ -248,17 +260,17 @@ def draw_badge_and_arrow(
 
     # 5. Draw Badge Shadow
     ctx.save()
-    ctx.arc(badge_x + 1.5, badge_y + 1.5, badge_radius, 0, 2 * math.pi)
+    ctx.arc(badge_x + shadow_off, badge_y + shadow_off, r, 0, 2 * math.pi)
     ctx.set_source_rgba(0.0, 0.0, 0.0, 0.3)
     ctx.fill()
     ctx.restore()
 
     # 6. Draw Badge Body (Circle)
     ctx.save()
-    ctx.arc(badge_x, badge_y, badge_radius, 0, 2 * math.pi)
+    ctx.arc(badge_x, badge_y, r, 0, 2 * math.pi)
     ctx.set_source_rgb(*color)
     ctx.fill_preserve()
-    ctx.set_line_width(2.5)
+    ctx.set_line_width(2.5 * scale)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.stroke()
     ctx.restore()
@@ -266,7 +278,7 @@ def draw_badge_and_arrow(
     # 7. Draw Number Text
     ctx.save()
     ctx.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-    ctx.set_font_size(15.0)
+    ctx.set_font_size(15.0 * scale)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
 
     extents = ctx.text_extents(str(number_str))
@@ -286,17 +298,20 @@ def draw_bounding_highlight(
     color: Tuple[float, float, float] = (0.145, 0.388, 0.922),
     radius: float = 6.0,
     pad: float = 4.0,
+    scale: float = 1.0,
 ) -> None:
     """Draw a neat rounded dashed rectangle around the target element."""
-    rx = x - pad
-    ry = y - pad
-    rw = max(1.0, w + pad * 2.0)
-    rh = max(1.0, h + pad * 2.0)
-    rad = min(radius, rw / 2.0, rh / 2.0)
+    scaled_pad = pad * scale
+    scaled_rad = radius * scale
+    rx = x - scaled_pad
+    ry = y - scaled_pad
+    rw = max(1.0, w + scaled_pad * 2.0)
+    rh = max(1.0, h + scaled_pad * 2.0)
+    rad = min(scaled_rad, rw / 2.0, rh / 2.0)
 
     ctx.save()
-    ctx.set_line_width(2.0)
-    ctx.set_dash([6.0, 4.0])
+    ctx.set_line_width(2.0 * scale)
+    ctx.set_dash([6.0 * scale, 4.0 * scale])
     ctx.set_source_rgba(color[0], color[1], color[2], 0.85)
 
     ctx.new_sub_path()
@@ -342,10 +357,11 @@ def annotate_image(
         surface = cairo.ImageSurface.create_from_png(valid_raw)
         width = surface.get_width()
         height = surface.get_height()
+        scale = compute_annotation_scale(width, height)
         obstacles = detect_cairo_surface_obstacles(surface)
         ctx = cairo.Context(surface)
 
-        badge_r = 18.0
+        badge_r = 18.0 * scale
         final_arrows: List[Dict[str, Any]] = []
         unresolved_collisions = 0
 
@@ -359,7 +375,7 @@ def annotate_image(
                 else:
                     bw = b3
                     bh = b4
-                draw_bounding_highlight(ctx, bx, by, bw, bh, color=color)
+                draw_bounding_highlight(ctx, bx, by, bw, bh, color=color, scale=scale)
 
             badge = item.get("badge")
             target = item.get("target")
@@ -375,9 +391,9 @@ def annotate_image(
                             obs["x1"], obs["y1"], obs["x2"], obs["y2"],
                         ):
                             return True
-                        if not _obs_near_point(obs, tx_c, ty_c) and _rect_intersects_segment(
+                        if not _obs_near_point(obs, tx_c, ty_c, tol=14.0 * scale) and _rect_intersects_segment(
                             obs["x1"], obs["y1"], obs["x2"], obs["y2"],
-                            cand_bx, cand_by, tx_c, ty_c, pad=4.0,
+                            cand_bx, cand_by, tx_c, ty_c, pad=4.0 * scale,
                         ):
                             return True
                     return False
@@ -385,7 +401,8 @@ def annotate_image(
                 collided = _has_collision(bx_c, by_c)
                 if collided and not allow_overlap and width >= 80 and height >= 80:
                     resolved = None
-                    for dist_step in (10, 20, 30, 45, 60, 80):
+                    for base_step in (10, 20, 30, 45, 60, 80):
+                        dist_step = int(round(base_step * scale))
                         for dx, dy in (
                             (0, -dist_step), (0, dist_step), (-dist_step, 0), (dist_step, 0),
                             (-dist_step, -dist_step), (dist_step, -dist_step),
@@ -394,7 +411,7 @@ def annotate_image(
                             nbx, nby = bx_c + dx, by_c + dy
                             if not (badge_r + 4 <= nbx <= width - badge_r - 4 and badge_r + 4 <= nby <= height - badge_r - 4):
                                 continue
-                            if math.hypot(tx_c - nbx, ty_c - nby) < 28.0:
+                            if math.hypot(tx_c - nbx, ty_c - nby) < 28.0 * scale:
                                 continue
                             if not _has_collision(nbx, nby):
                                 resolved = (nbx, nby)
@@ -415,13 +432,14 @@ def annotate_image(
                             f"still overlaps detected UI content."
                         )
 
-                draw_badge_and_arrow(ctx, bx_c, by_c, tx_c, ty_c, num, color=color)
+                draw_badge_and_arrow(ctx, bx_c, by_c, tx_c, ty_c, num, color=color, scale=scale)
+                obs_pad = 16.0 * scale
                 obstacles.append(
                     {
-                        "x1": min(bx_c, tx_c) - 16.0,
-                        "y1": min(by_c, ty_c) - 16.0,
-                        "x2": max(bx_c, tx_c) + 16.0,
-                        "y2": max(by_c, ty_c) + 16.0,
+                        "x1": min(bx_c, tx_c) - obs_pad,
+                        "y1": min(by_c, ty_c) - obs_pad,
+                        "x2": max(bx_c, tx_c) + obs_pad,
+                        "y2": max(by_c, ty_c) + obs_pad,
                     }
                 )
                 final_arrows.append(

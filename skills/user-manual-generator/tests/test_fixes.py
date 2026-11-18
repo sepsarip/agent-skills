@@ -1570,6 +1570,58 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         self.assertIn('w:color="3B82F6"', doc_xml)
         self.assertNotIn("&gt; **Note:**", doc_xml)
 
+    def test_high_dpi_annotation_auto_scaling(self):
+        """Verify high-DPI (2880x1800) screenshots scale arrow placement and Cairo badges proportionally."""
+        import cairo
+
+        # 1. Placement lengths should scale proportionally (> 90px on 2880x1800 vs <= 90px on 1000x800)
+        target = {"x1": 1000.0, "y1": 800.0, "x2": 1400.0, "y2": 880.0}
+        tx1, ty1, tx2, ty2 = find_optimal_arrow_placement(
+            target_box=target,
+            label="1",
+            obstacles=[],
+            img_width=2880,
+            img_height=1800,
+        )
+        length = math.hypot(tx1 - tx2, ty1 - ty2)
+        self.assertGreater(length, 90.0, f"High-DPI arrow length was not scaled: {length}px")
+
+        # 2. End-to-end Cairo CLI annotation on 2880x1800 PNG should succeed with zero unresolved collisions
+        raw_hd = os.path.join(self.tmp_dir, "hd_2880.png")
+        out_hd = os.path.join(self.tmp_dir, "hd_2880_out.png")
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 2880, 1800)
+        ctx = cairo.Context(surf)
+        ctx.set_source_rgb(1.0, 1.0, 1.0)
+        ctx.paint()
+        surf.write_to_png(raw_hd)
+
+        res = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "capture_and_annotate.py"),
+                "annotate",
+                "--auto",
+                "--draw-target-boxes",
+                "--engine",
+                "cairo",
+                "--input",
+                raw_hd,
+                "--output",
+                out_hd,
+                "--target",
+                "1000,800,1400,880,1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"High-DPI Cairo annotate failed: {res.stderr}")
+        with open(os.path.join(self.tmp_dir, "hd_2880_out.arrows.json"), "r", encoding="utf-8") as f:
+            audit = json.load(f)
+        self.assertEqual(audit["unresolved_collisions"], 0)
+        arr = audit["arrows"][0]
+        self.assertGreater(math.hypot(arr["x1"] - arr["x2"], arr["y1"] - arr["y2"]), 90.0)
+
 
 if __name__ == "__main__":
     unittest.main()
