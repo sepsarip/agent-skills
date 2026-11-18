@@ -20,7 +20,7 @@ A collection of modular skills for AI coding agents.
 |---|---|---|---|---|
 | [`license-audit`](skills/license-audit/SKILL.md) | `0.2.0` | Python 3.8+ (stdlib), offline-first | Audits third-party dependency and asset licenses, checks compatibility against project distribution models, identifies copyleft/IP risks, and generates actionable remediation reports. | [Guide](skills/license-audit/README.md) |
 | [`code-to-business-flow`](skills/code-to-business-flow/SKILL.md) | `0.1.0` | Python 3.8+ (stdlib) | Reverse-engineers application source code into business flows, user journeys, status lifecycles, and business rules with evidence tags and Mermaid diagrams. | [Guide](skills/code-to-business-flow/README.md) |
-| [`record-web-demo`](skills/record-web-demo/SKILL.md) | `0.2.0` | Node.js 18+, Playwright, ffmpeg | Automates recording web application UI walkthroughs into polished MP4, WebM, or GIF formats with dynamic vector cursors, speed ramping, optional camera auto-zoom, and step narration. | [Guide](skills/record-web-demo/README.md) |
+| [`record-web-demo`](skills/record-web-demo/SKILL.md) | `0.3.0` | Node.js 18+ (Playwright, Puppeteer, or Chromium + ffmpeg) | Automates recording web application UI walkthroughs into MP4, WebM, or GIF using installed browser runtimes/binaries with dynamic vector cursors, click ripples, speed ramping, optional auto-zoom, and step narration. | [Guide](skills/record-web-demo/README.md) |
 | [`user-manual-generator`](skills/user-manual-generator/SKILL.md) | `0.1.0` | Python 3.9+ | Generates publication-ready end-user manuals (.md, .docx, .pdf) with clickable Table of Contents, standard A4 layout, high-DPI screenshots, collision-free arrows, and feature gap analysis. | [Guide](skills/user-manual-generator/README.md) |
 
 ---

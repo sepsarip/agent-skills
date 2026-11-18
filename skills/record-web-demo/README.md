@@ -1,33 +1,30 @@
 # Record Web Demo Skill
 
-> Automated screen recording for web applications using Playwright with humanized pacing, dynamic cursor simulation, and multi-format transcoding (MP4, WebM, GIF).
+> Automated screen recording for web applications using whichever browser runtime and browser binary are already installed (Playwright, Puppeteer, or zero-dependency Chromium CDP), with humanized pacing, dynamic cursor simulation, and multi-format transcoding (MP4, WebM, GIF).
 
 ---
 
 ## 📌 Overview
 
-Automated browser tests execute at machine speed: mouse coordinates teleport instantly, forms fill in milliseconds, and the operating system cursor is completely invisible in headless mode. While efficient for CI tests, these recordings are disorienting and unwatchable for human product demos, visual documentation, release changelogs, and GitHub READMEs.
+Automated browser tests execute at machine speed: mouse coordinates teleport instantly, forms fill in milliseconds, and the operating system cursor is invisible in headless mode. While great for CI assertions, raw test runs are hard to follow in product demos, changelogs, and GitHub READMEs.
 
-The **`record-web-demo`** skill gives AI coding agents a deterministic, polished workflow to record web application walkthroughs. It injects dynamic, high-contrast vector cursors, applies humanized pacing with natural cursor trajectories, stages execution inside an isolated temporary directory, and transcodes raw captures into production-ready MP4 or GIF formats.
+The **`record-web-demo`** skill provides a reusable, offline-first runtime (`scripts/demo-harness.mjs`) that automatically discovers installed automation packages, browser binaries, and `ffmpeg` on the host without forcing network downloads or locking into a single browser vendor. It injects crisp Tabler vector cursors with click ripples, moves along eased curves, optionally zooms and narrates steps, speed-ramps slow waits, and exports clean MP4, WebM, or GIF outputs.
 
 ---
 
 ## ✨ Key Features
 
-- **Dynamic Vector Cursors**: Injects MIT-licensed Tabler vector cursors into the browser DOM (`document.documentElement`) that dynamically switch between standard arrow, interactive pointer hand, and text I-beam with calibrated hotspots and click feedback (`scale(0.85)`).
-- **Dual-Tone High Contrast**: Cursors feature white fills with dark borders and drop shadows, ensuring clear visibility across light, dark, and mixed application themes.
-- **Speed Ramping (Default: Active)**: Automatically accelerates long text typing (`1.5x–2x` via `42ms` character delay) and compresses slow loading spinners/network waits via FFmpeg `setpts` filters while keeping key UI transitions (modals, theme changes) at normal `1x` speed.
-- **Auto-Zoom & Pan on Hotspots (Opt-in, Default: Off)**: Smoothly zooms (`1.65x`) and pans the viewport toward compact inputs, password fields, or theme toggles so small controls remain legible on mobile screens, then zooms back out (`1x`) for full-layout navigation without exposing blank margins or scaling the cursor/badges.
-- **Step Callout / Visual Narration (Opt-in, Default: Off)**: Supports two user-selectable layout styles:
-  1. **`static-bar` (Recommended)**: Reserves a dedicated `52px` static footer bar (`#0f172a`) at the bottom while scaling the web application stage to `~0.92x` above it so the badge stays completely stationary without overlapping page controls.
-  2. **`floating`**: Keeps the web page at full `1.0x` scale and renders a floating semi-transparent pill badge that automatically dodges buttons and cursor proximity.
-- **Humanized Interaction Pacing**: Simulates realistic human interactions using stepped cursor curves (`steps: 25`), adaptive typing delays (`85ms` short / `42ms` long), and settle pauses (`800ms`) after state transitions or modals.
-- **Isolated Atomic Staging**: Colocates transient runner scripts and raw video buffers inside `recordings/.temp/`, ensuring a clean workspace that purges completely in a single `rm -rf` command.
-- **Multi-Format Export Pipeline**:
-  - **Native WebM**: Direct Playwright video output without transcoding overhead.
-  - **Optimized MP4**: H.264 video with `yuv420p` pixel format and `+faststart` flags for universal browser and mobile playback.
-  - **Two-Pass Palettegen GIF**: High-fidelity animated GIFs utilizing Bayer dithering to eliminate color banding while minimizing file size for GitHub READMEs.
-- **Headless-First Reliability**: Records full-fidelity video in headless environments without requiring a physical monitor or virtual framebuffer (Xvfb).
+- **Multi-Engine & Bring-Your-Own-Browser Discovery**:
+  - Automatically detects and reuses Node `playwright` / `playwright-core`, `puppeteer` / `puppeteer-core`, or falls back to a built-in zero-dependency **Chromium CDP** driver (`Page.startScreencast` + `ffmpeg`).
+  - Scans `DEMO_BROWSER_PATH`, `CHROME_BIN`, Playwright caches (`PLAYWRIGHT_BROWSERS_PATH`, `.venv*/ms-playwright`, `~/.cache/ms-playwright`), and system browsers (`google-chrome`, `chromium`, `brave-browser`, `microsoft-edge`, `firefox`).
+  - Discovers `ffmpeg` on `PATH` or inside Playwright binary caches.
+- **Dynamic Vector Cursors & Click Ripples**: Injects MIT-licensed Tabler SVG cursors (`default`, `pointer`, `text`) on `document.documentElement` plus expanding `#demo-click-ripple` highlights on `mousedown` so clicks remain readable even in 15fps GIFs.
+- **Humanized Interaction & Speed Ramping (Default: Active)**: Moves cursors along cubic ease-in-out trajectories, clears pre-filled fields before typing (`85ms`/char short, `42ms`/char `> 15` chars), and accelerates `withSpeedRamp()` segments via FFmpeg `trim`/`setpts`/`concat`.
+- **Auto-Zoom & Pan on Hotspots (Opt-in, Default: Off)**: Smoothly zooms onto compact inputs or Playwright locators (`demo.zoomTo(target, 1.65)`) clamped inside the app stage, then resets back (`demo.resetZoom()`).
+- **Dual-Mode Step Callouts (Opt-in, Default: Off)**:
+  1. **`static-bar` (Recommended)**: Fixed `52px` bottom bar (`#0f172a`) with `~0.92x` scaled stage above it so badges never cover controls.
+  2. **`floating`**: Full `1.0x` stage with an auto-dodging pill badge across 4 viewport anchors.
+- **Atomic Staging & Multi-Format Export**: Keeps transient files in `recordings/.temp/`, transcodes to H.264 `+faststart` MP4, WebM, or two-pass Bayer-dithered GIF, and removes `.temp/` in `finally`.
 
 ---
 
@@ -35,129 +32,118 @@ The **`record-web-demo`** skill gives AI coding agents a deterministic, polished
 
 ```text
 skills/record-web-demo/
-├── SKILL.md                          # Core agent instructions, cursor SVGs & execution workflow
-└── README.md                         # Human-readable documentation & reference guide
+├── SKILL.md                    # Core agent workflow and API reference
+├── README.md                   # Human-readable guide & examples
+├── scripts/
+│   └── demo-harness.mjs        # Offline discovery, multi-engine runner & FFmpeg transcoder
+└── tests/
+    └── test_harness.mjs        # Node built-in unit & end-to-end tests
 ```
 
 ---
 
-## 🔄 The 6-Step Recording Workflow
+## 🔄 Workflow
 
 ```mermaid
 flowchart TD
-    Step1["Step 1: Pre-flight Verification\n(Node.js, Playwright, ffmpeg)"] --> Step2["Step 2: Define Scenario & Destination\n(Resolution, Format, Output Path)"]
-    Step2 --> Step3["Step 3: Generate Runner Script\n(Dynamic Cursors & Pacing in recordings/.temp/)"]
-    Step3 --> Step4["Step 4: Execute Headless Recording\n(Capture Raw WebM Buffer)"]
-    Step4 --> Step5["Step 5: Post-Processing & Transcoding\n(ffmpeg MP4 / GIF Conversion)"]
-    Step5 --> Step6["Step 6: Atomic Cleanup & Verification\n(Purge .temp, Verify File Size)"]
+    Step0["Step 0: Offline Env Discovery\n(demo-harness.mjs --check-env)"] --> Step1["Step 1: Confirm Scenario & Features\n(Resolution, Formats, Zoom, Step Bar)"]
+    Step1 --> Step2["Step 2: Write Concise Runner\n(recordings/.temp/runner.mjs)"]
+    Step2 --> Step3["Step 3: Record & Transcode\n(Playwright / Puppeteer / Native CDP -> MP4, WebM, GIF)"]
+    Step3 --> Step4["Step 4: Atomic Cleanup & Verify\n(Purge .temp, Verify Non-Zero Output)"]
 ```
 
-### Step 1: Pre-flight Verification
-Checks necessary runtime dependencies:
-- Node.js environment (`node -v`)
-- Playwright runner & Chromium browser (`npx -y playwright install chromium`)
-- FFmpeg availability for transcoding (`ffmpeg -version`)
+### Step 0: Check Available Tools Offline
 
-### Step 2: Define Scenario & Parameters
-Establishes recording parameters and confirms optional features before generating code:
-- **Target URL**: Dev server (e.g. `http://localhost:3000`) or production deployment.
-- **Dimensions**: 1280x720 (720p 16:9 standard for READMEs) or 1920x1080 (1080p).
-- **Target Format**: WebM, MP4, or GIF.
-- **Visual & Timing Enhancements**:
-  - **Speed Ramping** (**Default: Active**): Adaptive typing (`1.5x–2x` for long text) and FFmpeg timeline acceleration for slow loading spinners.
-  - **Auto-Zoom & Pan** (**Default: Off** — ask user whether to enable): Smooth camera zoom onto compact inputs and toggles.
-  - **Step Callout / Visual Narration** (**Default: Off** — ask user whether to enable and show visual comparison between `[A] Static Bottom Bar` and `[B] Floating Badge`):
-    ```text
-    [A] Static Bottom Bar (mode: 'static-bar' — Recommended)
-    +---------------------------------------------------+
-    |  +---------------------------------------------+  |
-    |  |         Halaman Web Demo (Scale ~0.92x)     |  |
-    |  |       Bebas tumpang tindih dengan tombol    |  |
-    |  +---------------------------------------------+  |
-    +---------------------------------------------------+
-    |         [ Langkah 1: Masuk dengan Akun ]          | <- Bar Statis 52px (Posisi Tetap)
-    +---------------------------------------------------+
+```bash
+node skills/record-web-demo/scripts/demo-harness.mjs --check-env
+```
 
-    [B] Floating Badge (mode: 'floating')
-    +---------------------------------------------------+
-    |                                                   |
-    |            Halaman Web Demo (Full 1.0x)           |
-    |                                                   |
-    |         ( Langkah 1: Masuk dengan Akun )          | <- Pill Melayang (Auto-Dodge jika ada tombol)
-    +---------------------------------------------------+
-    ```
-- **Output Destination**: Standardized under `recordings/<scenario-name>.<ext>` (avoids generic `demo.mp4` collisions).
+Inspects Node.js, installed drivers, cached/system browsers, and `ffmpeg` in `<50ms` without hitting the network.
 
-### Step 3: Script Generation with Dynamic Vector Cursors & Helpers
-Generates a self-contained runner script directly inside `recordings/.temp/runner.mjs`. Injects adaptive SVG cursors and helpers:
-- **Default Arrow**: Calibrated at hotspot `(-4px, -4px)`.
-- **Pointer Hand**: Automatically triggered when hovering over `button`, `a`, `[role="button"]`, or elements with `cursor: pointer`.
-- **Text I-Beam**: Automatically triggered over inputs, textareas, and contenteditable elements.
-- **Click Feedback**: Scales cursor to `0.85` on `mousedown` and restores to `1.0` on `mouseup`.
-- **Speed Ramping Helpers**: `humanType()` (accelerates inputs > 15 chars to `42ms`) and `withSpeedRamp()` (tracks slow loading intervals for FFmpeg acceleration).
-- **Optional Camera & Callout Helpers**: `zoomTo()` / `resetZoom()` (clamped viewport pan/zoom on `document.body`) and `showStep()` / `hideStep()` (floating badge mounted on `document.documentElement`).
+### Step 1: Choose Parameters & Optional Visual Aids
 
-### Step 4: Execute Recording
-Runs the headless script via Node.js, capturing the raw WebM buffer and any `FAST_SEGMENTS` metadata:
+- **Resolution**: `1280x720` (default) or `1920x1080`.
+- **Formats**: `.mp4`, `.gif`, `.webm`, or an array exporting multiple formats from a single recording.
+- **Step Narration Layout** (when enabled):
+
+```text
+[A] Static Bottom Bar (stepMode: 'static-bar' — Recommended)
++---------------------------------------------------+
+|  +---------------------------------------------+  |
+|  |         Web Application Stage (~0.92x)      |  |
+|  |       Zero overlap with page controls       |  |
+|  +---------------------------------------------+  |
++---------------------------------------------------+
+|          [ Step 1: Sign in with account ]         | <- Fixed 52px bottom bar
++---------------------------------------------------+
+
+[B] Floating Pill (stepMode: 'floating')
++---------------------------------------------------+
+|                                                   |
+|            Web Application Stage (1.0x)           |
+|                                                   |
+|         ( Step 1: Sign in with account )          | <- Auto-dodges cursor & buttons
++---------------------------------------------------+
+```
+
+### Step 2–3: Run a Declarative Demo Script
+
+Write a minimal `recordings/.temp/runner.mjs` importing `recordDemo`:
+
+```javascript
+import { recordDemo } from '../skills/record-web-demo/scripts/demo-harness.mjs';
+
+await recordDemo({
+  url: 'http://localhost:3000',
+  output: ['recordings/login-flow.mp4', 'recordings/login-flow.gif'],
+  viewport: { width: 1280, height: 720 },
+  stepMode: 'static-bar',
+}, async (demo) => {
+  await demo.showStep('Step 1: Sign in with your account');
+  await demo.zoomTo('#login-card', 1.5);
+  await demo.humanType('#email', 'alex@example.com');
+  await demo.humanType('#password', 'correct-horse-battery');
+  await demo.resetZoom();
+  await demo.withSpeedRamp(() => demo.moveAndClick('button[type="submit"]'));
+  await demo.pause(900);
+});
+```
+
+Run it with:
+
 ```bash
 node recordings/.temp/runner.mjs
 ```
 
-### Step 5: Post-Processing, Speed Ramping & Transcoding
-Converts the raw WebM buffer to the requested target format (and applies `trim` + `setpts` speed ramping if `FAST_SEGMENTS` were recorded):
+To re-transcode or apply speed ramps to an existing capture directly:
 
-- **Web-Optimized MP4**:
-  ```bash
-  ffmpeg -y -i recordings/.temp/<raw>.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
-  ```
-
-- **Timeline Speed Ramping MP4 (1.75x on loading segments)**:
-  ```bash
-  ffmpeg -y -i recordings/.temp/<raw>.webm -filter_complex \
-    "[0:v]trim=0:3.0,setpts=PTS-STARTPTS[v0]; \
-     [0:v]trim=3.0:6.5,setpts=(PTS-STARTPTS)/1.75[v1]; \
-     [0:v]trim=6.5,setpts=PTS-STARTPTS[v2]; \
-     [v0][v1][v2]concat=n=3:v=1:a=0[outv]" \
-    -map "[outv]" -c:v libx264 -pix_fmt yuv420p -movflags +faststart recordings/<scenario-name>.mp4
-  ```
-
-- **Optimized Two-Pass GIF**:
-  ```bash
-  ffmpeg -y -i recordings/.temp/<raw>.webm -filter_complex "[0:v] fps=15,scale=1280:-1:flags=lanczos,split [a][b];[a] palettegen=stats_mode=diff [p];[b][p] paletteuse=dither=bayer:bayer_scale=3" recordings/<scenario-name>.gif
-  ```
-
-### Step 6: Atomic Cleanup & Delivery
-Purges the staging folder completely to leave zero transient artifacts:
 ```bash
-rm -rf recordings/.temp
+node skills/record-web-demo/scripts/demo-harness.mjs --transcode raw.webm \
+  --output recordings/flow.mp4 --output recordings/flow.gif \
+  --segments '[{"start":1.2,"end":3.8,"speed":1.75}]'
 ```
-Verifies output file size and delivers the relative/absolute path to the user.
+
+---
+
+## 🧪 Running Tests
+
+```bash
+node --test skills/record-web-demo/tests/test_harness.mjs
+```
 
 ---
 
 ## 🛠️ Requirements & Prerequisites
 
-| Requirement | Purpose | Recommended Version |
+| Requirement | Purpose | Notes |
 |---|---|---|
-| **Node.js** | Script execution runtime | Node.js 18+ (LTS) |
-| **Playwright** | Headless browser automation & video recording | `@playwright/test` or `playwright` |
-| **Chromium** | Browser binary | Installed via `npx playwright install chromium` |
-| **FFmpeg** | Video transcoding to MP4 and optimized GIF | 4.x / 5.x / 6.x (optional for native WebM) |
-
----
-
-## 💡 Best Practices & Gotchas
-
-- **Video Buffer Flush**: Playwright writes video frames asynchronously. Always await `context.close()` and `browser.close()` before moving or converting video files, otherwise files will be 0 bytes.
-- **Overlay Mounting & Static Step Bar**: Append `#demo-cursor` and `#demo-step-bar` to `document.documentElement` (`<html>`) while applying CSS stage scaling (`~0.92x` base stage or `1.65x` hotspot zoom) to `document.body`. Persist cursor and step state in `sessionStorage` (`__demoCursor`, `__demoStep`, `__demoStepBar`) so page reloads never reset the cursor to `(0, 0)` or drop the bottom bar, and call `showStep()` **before** `zoomTo()` / `moveAndClick()`.
-- **Viewport Synchronization**: Always match `viewport` and `recordVideo.size` in `browser.newContext()` to identical dimensions (e.g. `1280x720`) to prevent black borders or distortion.
-- **Dynamic Selectors vs. Hardcoded Sleep**: Use `waitForSelector` or `waitForLoadState('networkidle')` before initiating interactions rather than arbitrary short sleeps.
-- **Zero Directory Pollution**: Never place temporary scripts in root or create separate `scripts/` or `tmp/` folders in the target project. Keep transient assets confined to `recordings/.temp/`.
-- **Git Hygiene**: Add `recordings/.temp/` and `recordings/` to `.gitignore` to avoid checking large video binaries into version control.
+| **Node.js 18+** | Harness & runner runtime | Uses Node built-ins only (zero external npm deps required by harness) |
+| **Any Browser + Driver** | Headless page capture | Reuses installed Playwright, Puppeteer, or zero-dep Native CDP with Chrome/Edge/Brave/Chromium |
+| **FFmpeg** | MP4, GIF, speed ramping, & CDP encoding | Uses `PATH` or Playwright-cached `ffmpeg`; optional if only Playwright `.webm` is needed |
 
 ---
 
 ## 📄 License
 
-This skill is distributed under the [MIT License](../../LICENSE).
-Dynamic cursors are based on [Tabler Icons](https://github.com/tabler/tabler-icons) under the MIT License.
+Distributed under the [MIT License](../../LICENSE).
+Dynamic vector cursors are adapted from [Tabler Icons](https://github.com/tabler/tabler-icons) (MIT License).
