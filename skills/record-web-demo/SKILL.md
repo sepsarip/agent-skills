@@ -116,7 +116,8 @@ console.log(JSON.stringify(result, null, 2));
 
 | Option / Method | Behavior |
 |---|---|
-| `options.url` | Initial URL navigated automatically before recording starts (optional if calling `demo.goto()`). |
+| `options.url` | Initial entry URL navigated automatically before recording starts. |
+| `demo.goto(url, waitUntil)` | Direct URL navigation. Use **only** for the initial entry URL, unlinked routes, or explicit user requests to jump via URL — never as a shortcut for in-app menu/tab navigation. |
 | `options.output` | Single path or array of `.mp4`, `.webm`, `.gif` destinations. |
 | `options.viewport` | `{ width, height }` synchronized with capture size (default `1280x720`). |
 | `options.stepMode` | `'static-bar'` (default), `'floating'`, or `'off'`. |
@@ -164,6 +165,7 @@ Before finishing:
 
 ## Key Gotchas
 
+- **UI click navigation over `demo.goto()`**: Drive all mid-flow page and tab transitions with `demo.moveAndClick()` (including opening prerequisite sidebar, avatar, or dropdown menus first) so viewers see the cursor path and click ripple. Reserve `demo.goto()` strictly for the initial entry URL (`options.url`), pages with no UI link, or when the user explicitly asks to jump directly to a URL.
 - **Overlays mount on `document.documentElement`**: Camera transforms target `document.body`; mounting `#demo-cursor`, `.demo-click-ripple`, and step bars on `<html>` prevents cursor distortion during zoom.
 - **Navigation persistence**: Cursor coordinates (`__demoCursor`) and active step state (`__demoStep`, `__demoStepMode`) persist in `sessionStorage` so multi-page flows do not snap back to `(0, 0)`.
 - **Call order**: Call `demo.showStep()` **after** navigation completes and **before** `demo.zoomTo()` or `demo.moveAndClick()`.
