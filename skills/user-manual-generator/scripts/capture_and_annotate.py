@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -25,16 +26,16 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
-try:
+from annotate_cairo import (
+    HAVE_CAIRO,
+    circle_intersects_rect,
+    detect_cairo_surface_obstacles,
+    draw_badge_and_arrow as cairo_draw_badge_and_arrow,
+    draw_bounding_highlight as cairo_draw_bounding_highlight,
+    rect_intersects_segment,
+)
+if HAVE_CAIRO:
     import cairo
-    from annotate_cairo import (
-        detect_cairo_surface_obstacles,
-        draw_badge_and_arrow as cairo_draw_badge_and_arrow,
-        draw_bounding_highlight as cairo_draw_bounding_highlight,
-    )
-    HAVE_CAIRO = True
-except ImportError:
-    HAVE_CAIRO = False
 
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -75,13 +76,244 @@ def validate_url(url: str) -> str:
 # ---------------------------------------------------------
 # Capture & Layout Mapping
 # ---------------------------------------------------------
+def _find_chromium_executable(playwright_obj: Any) -> Optional[str]:
+    """Locate Playwright or system Chromium binary without triggering network downloads."""
+    try:
+        exec_path = playwright_obj.chromium.executable_path
+        if exec_path and os.path.isfile(exec_path):
+            return exec_path
+    except Exception:
+        pass
+
+    cache_roots = [
+        os.path.join(os.getcwd(), ".venv-manual", "ms-playwright"),
+        os.path.expanduser("~/.cache/ms-playwright"),
+    ]
+    for root in cache_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for cand_name in ("chrome", "chrome-headless-shell", "chromium"):
+                if cand_name in filenames:
+                    cand = os.path.join(dirpath, cand_name)
+                    if os.access(cand, os.X_OK):
+                        return cand
+
+    for bin_name in ("chromium", "chromium-browser", "google-chrome", "microsoft-edge"):
+        found = shutil.which(bin_name)
+        if found:
+            return found
+    return None
+
+
+def _resolve_spec_asset(raw_path: str, spec_dir: str, must_exist: bool = False) -> str:
+    """Resolve a path from manual_spec.json safely within the workspace."""
+    if not raw_path:
+        return ""
+    norm = raw_path.replace("\\", "/")
+    if norm.startswith("assets/"):
+        return validate_workspace_path(os.path.join(spec_dir, raw_path), must_exist=must_exist)
+    primary = validate_workspace_path(raw_path, must_exist=False)
+    if os.path.exists(primary):
+        return primary
+    assets_idx = norm.find("assets/")
+    if assets_idx >= 0:
+        cand = validate_workspace_path(os.path.join(spec_dir, norm[assets_idx:]), must_exist=False)
+        if os.path.exists(cand) or not must_exist:
+            return cand
+    return validate_workspace_path(raw_path, must_exist=must_exist)
+
+
+def _capture_single_page(
+    page: Any,
+    url: str,
+    out_path: str,
+    width: int,
+    height: int,
+    scale: int,
+    wait_ms: int,
+    full_page: bool,
+    mask_selectors: List[str],
+    target_specs: List[str],
+) -> None:
+    """Navigate to url, extract DOM text & target bounding boxes, and save high-DPI screenshot."""
+    try:
+        page.goto(url, wait_until="networkidle")
+    except Exception:
+        page.goto(url, wait_until="domcontentloaded")
+
+    if wait_ms > 0:
+        page.wait_for_timeout(wait_ms)
+
+    # Lock scroll at top before DOM geometry extraction so boxes align with screenshot
+    page.evaluate("() => window.scrollTo(0, 0)")
+
+    layout_data: Dict[str, Any] = {
+        "url": url,
+        "scale": scale,
+        "width": width * scale,
+        "height": height * scale,
+        "text_rects": [],
+        "target_boxes": [],
+    }
+
+    js_script = """
+    () => {
+        const rects = [];
+        const walker = document.createTreeWalker(
+            document.body,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: (node) => {
+                    if (!node.textContent || !node.textContent.trim()) return NodeFilter.FILTER_REJECT;
+                    const el = node.parentElement;
+                    if (!el) return NodeFilter.FILTER_REJECT;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }
+        );
+
+        while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const clientRects = range.getClientRects();
+            for (let i = 0; i < clientRects.length; i++) {
+                const r = clientRects[i];
+                if (r.width > 2 && r.height > 2) {
+                    rects.push({
+                        x: r.left + window.scrollX,
+                        y: r.top + window.scrollY,
+                        w: r.width,
+                        h: r.height,
+                        text: node.textContent.trim().slice(0, 30)
+                    });
+                }
+            }
+        }
+        return rects;
+    }
+    """
+    raw_text_rects = page.evaluate(js_script)
+    for r in raw_text_rects:
+        layout_data["text_rects"].append(
+            {
+                "x1": r["x"] * scale,
+                "y1": r["y"] * scale,
+                "x2": (r["x"] + r["w"]) * scale,
+                "y2": (r["y"] + r["h"]) * scale,
+                "text": r["text"],
+            }
+        )
+
+    for t_spec in target_specs:
+        label = ""
+        selector = t_spec
+        if "=" in t_spec:
+            parts = t_spec.split("=", 1)
+            label = parts[0].strip()
+            selector = parts[1].strip()
+
+        loc = page.locator(selector).first
+        if loc.count() == 0:
+            print(f"[WARNING] Target selector '{selector}' not found in DOM.")
+            continue
+        bbox = loc.bounding_box()
+        if not bbox:
+            print(f"[WARNING] Target selector '{selector}' has no bounding box.")
+            continue
+
+        layout_data["target_boxes"].append(
+            {
+                "label": label,
+                "selector": selector,
+                "x1": bbox["x"] * scale,
+                "y1": bbox["y"] * scale,
+                "x2": (bbox["x"] + bbox["width"]) * scale,
+                "y2": (bbox["y"] + bbox["height"]) * scale,
+            }
+        )
+
+    mask_locators = [page.locator(sel) for sel in mask_selectors]
+    screenshot_kwargs: Dict[str, Any] = {
+        "path": out_path,
+        "full_page": full_page,
+        "mask": mask_locators if mask_locators else None,
+        "animations": "disabled",
+        "caret": "hide",
+        "scale": "device",
+    }
+    try:
+        page.screenshot(**screenshot_kwargs)
+    except TypeError:
+        page.screenshot(
+            path=out_path,
+            full_page=full_page,
+            mask=mask_locators if mask_locators else None,
+        )
+
+    layout_path = f"{os.path.splitext(out_path)[0]}.layout.json"
+    with open(layout_path, "w", encoding="utf-8") as f:
+        json.dump(layout_data, f, indent=2)
+
+    print(f"[OK] High-DPI screenshot saved to: {out_path}")
+    print(f"[OK] Layout map sidecar saved to: {layout_path}")
+
+
+def _collect_capture_tasks_from_spec(spec_path: str, force: bool = False) -> List[Dict[str, Any]]:
+    """Collect figure capture tasks from manual_spec.json."""
+    spec_dir = os.path.dirname(spec_path)
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+
+    tasks: List[Dict[str, Any]] = []
+    for ch in spec.get("chapters", []):
+        for sec in ch.get("sections", []):
+            for fig in sec.get("figures", []):
+                src = fig.get("source") or {}
+                url = str(src.get("url", "")).strip()
+                raw_rel = str(src.get("raw", "")).strip()
+                if not url or not raw_rel:
+                    continue
+                out_path = _resolve_spec_asset(raw_rel, spec_dir, must_exist=False)
+                if os.path.isfile(out_path) and not force:
+                    continue
+                tasks.append(
+                    {
+                        "id": str(fig.get("id", "")),
+                        "url": validate_url(url),
+                        "output": out_path,
+                        "targets": [str(t) for t in src.get("targets", [])],
+                    }
+                )
+    return tasks
+
+
 def cmd_capture(args: argparse.Namespace) -> None:
-    """Capture crisp high-DPI screenshot from URL and extract text/element layout coordinates."""
-    url = validate_url(args.url)
-    out_path = validate_workspace_path(args.output, must_exist=False)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    """Capture crisp high-DPI screenshot(s) from URL or manual_spec.json."""
+    mask_selectors = [s.strip() for s in args.mask_selectors.split(",") if s.strip()]
+
+    if getattr(args, "spec", ""):
+        spec_path = validate_workspace_path(args.spec, must_exist=True)
+        tasks = _collect_capture_tasks_from_spec(spec_path, force=getattr(args, "force", False))
+        if not tasks:
+            print("[OK] No pending URL screenshots to capture from spec (use --force to recapture).")
+            return
+    else:
+        if not args.url or not args.output:
+            raise ValueError("Validation Error: Provide either --spec or both --url and --output.")
+        tasks = [
+            {
+                "id": "",
+                "url": validate_url(args.url),
+                "output": validate_workspace_path(args.output, must_exist=False),
+                "targets": args.target or [],
+            }
+        ]
 
     try:
         from playwright.sync_api import sync_playwright
@@ -90,11 +322,15 @@ def cmd_capture(args: argparse.Namespace) -> None:
             "Error: Playwright is not installed. Run: pip install playwright && python -m playwright install chromium"
         )
 
-    mask_selectors = [s.strip() for s in args.mask_selectors.split(",") if s.strip()]
-    target_specs = args.target or []
-
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        launch_kwargs: Dict[str, Any] = {"headless": True}
+        default_exec = getattr(p.chromium, "executable_path", "")
+        if not (default_exec and os.path.isfile(default_exec)):
+            found_exec = _find_chromium_executable(p)
+            if found_exec:
+                launch_kwargs["executable_path"] = found_exec
+
+        browser = p.chromium.launch(**launch_kwargs)
         try:
             context = browser.new_context(
                 viewport={"width": args.width, "height": args.height},
@@ -102,119 +338,23 @@ def cmd_capture(args: argparse.Namespace) -> None:
             )
             page = context.new_page()
             page.set_default_timeout(args.timeout * 1000)
-            page.goto(url, wait_until="networkidle")
 
-            if args.wait_ms > 0:
-                page.wait_for_timeout(args.wait_ms)
-
-            # Collect element and text node bounding rects in image pixels
-            layout_data: Dict[str, Any] = {
-                "url": url,
-                "scale": args.scale,
-                "width": args.width * args.scale,
-                "height": args.height * args.scale,
-                "text_rects": [],
-                "target_boxes": [],
-            }
-
-            # Evaluate DOM layout to record obstacle text rectangles
-            js_script = """
-            () => {
-                const rects = [];
-                const walker = document.createTreeWalker(
-                    document.body,
-                    NodeFilter.SHOW_TEXT,
-                    {
-                        acceptNode: (node) => {
-                            if (!node.textContent || !node.textContent.trim()) return NodeFilter.FILTER_REJECT;
-                            const el = node.parentElement;
-                            if (!el) return NodeFilter.FILTER_REJECT;
-                            const style = window.getComputedStyle(el);
-                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                                return NodeFilter.FILTER_REJECT;
-                            }
-                            return NodeFilter.FILTER_ACCEPT;
-                        }
-                    }
-                );
-
-                while (walker.nextNode()) {
-                    const node = walker.currentNode;
-                    const range = document.createRange();
-                    range.selectNodeContents(node);
-                    const clientRects = range.getClientRects();
-                    for (let i = 0; i < clientRects.length; i++) {
-                        const r = clientRects[i];
-                        if (r.width > 2 && r.height > 2) {
-                            rects.push({
-                                x: r.left + window.scrollX,
-                                y: r.top + window.scrollY,
-                                w: r.width,
-                                h: r.height,
-                                text: node.textContent.trim().slice(0, 30)
-                            });
-                        }
-                    }
-                }
-                return rects;
-            }
-            """
-            raw_text_rects = page.evaluate(js_script)
-            for r in raw_text_rects:
-                layout_data["text_rects"].append(
-                    {
-                        "x1": r["x"] * args.scale,
-                        "y1": r["y"] * args.scale,
-                        "x2": (r["x"] + r["w"]) * args.scale,
-                        "y2": (r["y"] + r["h"]) * args.scale,
-                        "text": r["text"],
-                    }
+            for item in tasks:
+                out_dir = os.path.dirname(item["output"])
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                _capture_single_page(
+                    page=page,
+                    url=item["url"],
+                    out_path=item["output"],
+                    width=args.width,
+                    height=args.height,
+                    scale=args.scale,
+                    wait_ms=args.wait_ms,
+                    full_page=args.full_page,
+                    mask_selectors=mask_selectors,
+                    target_specs=item["targets"],
                 )
-
-            # Resolve specified target selectors: "1=#button-id" or "selector"
-            for t_spec in target_specs:
-                label = ""
-                selector = t_spec
-                if "=" in t_spec:
-                    parts = t_spec.split("=", 1)
-                    label = parts[0].strip()
-                    selector = parts[1].strip()
-
-                loc = page.locator(selector).first
-                if loc.count() == 0:
-                    print(f"[WARNING] Target selector '{selector}' not found in DOM.")
-                    continue
-                bbox = loc.bounding_box()
-                if not bbox:
-                    print(f"[WARNING] Target selector '{selector}' has no bounding box.")
-                    continue
-
-                layout_data["target_boxes"].append(
-                    {
-                        "label": label,
-                        "selector": selector,
-                        "x1": bbox["x"] * args.scale,
-                        "y1": bbox["y"] * args.scale,
-                        "x2": (bbox["x"] + bbox["width"]) * args.scale,
-                        "y2": (bbox["y"] + bbox["height"]) * args.scale,
-                    }
-                )
-
-            # Mask sensitive elements
-            mask_locators = [page.locator(sel) for sel in mask_selectors]
-            page.screenshot(
-                path=out_path,
-                full_page=args.full_page,
-                mask=mask_locators if mask_locators else None,
-            )
-
-            # Write layout sidecar file: <output>.layout.json
-            layout_path = f"{os.path.splitext(out_path)[0]}.layout.json"
-            with open(layout_path, "w", encoding="utf-8") as f:
-                json.dump(layout_data, f, indent=2)
-
-            print(f"[OK] High-DPI screenshot saved to: {out_path}")
-            print(f"[OK] Layout map sidecar saved to: {layout_path}")
         finally:
             browser.close()
 
@@ -223,7 +363,7 @@ def cmd_capture(args: argparse.Namespace) -> None:
 # Grid Helper
 # ---------------------------------------------------------
 def _load_font(size: int) -> Any:
-    """Load a clean sans-serif font with graceful fallback."""
+    """Load a clean sans-serif font with scalable Pillow 10.1+ fallback."""
     if not HAVE_PIL:
         return None
     font_candidates = [
@@ -238,7 +378,10 @@ def _load_font(size: int) -> Any:
                 return ImageFont.truetype(path, size=size)
             except OSError:
                 continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def cmd_grid(args: argparse.Namespace) -> None:
@@ -292,64 +435,6 @@ def cmd_grid(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------
 # Collision Detection & Arrow Geometry
 # ---------------------------------------------------------
-def rect_intersects_segment(
-    rx1: float, ry1: float, rx2: float, ry2: float,
-    x1: float, y1: float, x2: float, y2: float, pad: float = 6.0
-) -> bool:
-    """Check if line segment (x1,y1)-(x2,y2) intersects a padded rectangle."""
-    min_x, max_x = min(rx1, rx2) - pad, max(rx1, rx2) + pad
-    min_y, max_y = min(ry1, ry2) - pad, max(ry1, ry2) + pad
-
-    if min_x <= x1 <= max_x and min_y <= y1 <= max_y:
-        return True
-    if min_x <= x2 <= max_x and min_y <= y2 <= max_y:
-        return True
-
-    if max(x1, x2) < min_x or min(x1, x2) > max_x:
-        return False
-    if max(y1, y2) < min_y or min(y1, y2) > max_y:
-        return False
-
-    dx = x2 - x1
-    dy = y2 - y1
-    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-        return False
-
-    for edge_p1, edge_p2 in [
-        ((min_x, min_y), (max_x, min_y)),
-        ((max_x, min_y), (max_x, max_y)),
-        ((max_x, max_y), (min_x, max_y)),
-        ((min_x, max_y), (min_x, min_y)),
-    ]:
-        ex1, ey1 = edge_p1
-        ex2, ey2 = edge_p2
-        denom = (dy * (ex2 - ex1)) - (dx * (ey2 - ey1))
-        if abs(denom) < 1e-6:
-            continue
-        ua = ((dx * (ey1 - y1)) - (dy * (ex1 - x1))) / denom
-        ub = (((ex2 - ex1) * (ey1 - y1)) - ((ey2 - ey1) * (ex1 - x1))) / denom
-        if 0.0 <= ua <= 1.0 and 0.0 <= ub <= 1.0:
-            return True
-
-    return False
-
-
-def circle_intersects_rect(
-    cx: float, cy: float, radius: float,
-    rx1: float, ry1: float, rx2: float, ry2: float
-) -> bool:
-    """Check if circle at (cx,cy) intersects axis-aligned rectangle."""
-    min_x, max_x = min(rx1, rx2), max(rx1, rx2)
-    min_y, max_y = min(ry1, ry2), max(ry1, ry2)
-
-    closest_x = max(min_x, min(cx, max_x))
-    closest_y = max(min_y, min(cy, max_y))
-
-    dist_x = cx - closest_x
-    dist_y = cy - closest_y
-    return (dist_x * dist_x + dist_y * dist_y) <= (radius * radius)
-
-
 def detect_image_dense_obstacles(img: Any) -> List[Dict[str, float]]:
     """Detect textual/content regions from screenshot pixels using edge filtering."""
     if not HAVE_PIL:
@@ -550,6 +635,26 @@ def find_optimal_arrow_placement(
 # ---------------------------------------------------------
 # Drawing & Annotation
 # ---------------------------------------------------------
+def _draw_pillow_highlight_box(
+    draw: Any,
+    bx1: float,
+    by1: float,
+    bx2: float,
+    by2: float,
+    color: Tuple[int, int, int] = (230, 30, 40),
+    pad: float = 4.0,
+) -> None:
+    """Draw a rounded highlight box with white contrast border using Pillow."""
+    outer = [bx1 - pad - 1, by1 - pad - 1, bx2 + pad + 1, by2 + pad + 1]
+    inner = [bx1 - pad, by1 - pad, bx2 + pad, by2 + pad]
+    if hasattr(draw, "rounded_rectangle"):
+        draw.rounded_rectangle(outer, radius=6, outline=(255, 255, 255), width=5)
+        draw.rounded_rectangle(inner, radius=6, outline=color, width=3)
+    else:
+        draw.rectangle(outer, outline=(255, 255, 255), width=5)
+        draw.rectangle(inner, outline=color, width=3)
+
+
 def _draw_arrow_with_callout(
     draw: Any,
     x1: float,
@@ -595,15 +700,18 @@ def _draw_arrow_with_callout(
             fill=color,
         )
         font = _load_font(int(radius * 1.2))
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        draw.text(
-            (x1 - tw / 2, y1 - th / 2 - bbox[1] / 2),
-            label,
-            fill=(255, 255, 255),
-            font=font,
-        )
+        try:
+            draw.text((x1, y1), label, fill=(255, 255, 255), font=font, anchor="mm")
+        except ValueError:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            draw.text(
+                (x1 - tw / 2, y1 - th / 2 - bbox[1] / 2),
+                label,
+                fill=(255, 255, 255),
+                font=font,
+            )
 
 
 def _arrow_hits_obstacles(
@@ -634,7 +742,7 @@ def _arrow_hits_obstacles(
         if (ox2 - ox1) <= 35 and (oy2 - oy1) <= 35:
             if (ox1 - 8) <= ax2 <= (ox2 + 8) and (oy1 - 8) <= ay2 <= (oy2 + 8):
                 continue
-        if rect_intersects_segment(ox1, oy1, ox2, oy2, ax1, ay1, ax2, ay2):
+        if rect_intersects_segment(ox1, oy1, ox2, oy2, ax1, ay1, ax2, ay2, pad=6.0):
             return True
     return False
 
@@ -657,62 +765,60 @@ def _parse_boxes(args: argparse.Namespace) -> List[Tuple[float, float, float, fl
     return parsed
 
 
-def _cmd_annotate_cairo(
+def _parse_numeric_target(t_arg: str, default_label: str) -> Optional[Dict[str, Any]]:
+    """Parse 'x1,y1,x2,y2[,label]' into a target box dict; ignore CSS selector strings."""
+    parts = [p.strip() for p in t_arg.split(",")]
+    if len(parts) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = map(float, parts[:4])
+    except ValueError:
+        return None
+    return {
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "label": parts[4] if len(parts) > 4 else default_label,
+    }
+
+
+def _resolve_annotations(
     args: argparse.Namespace,
-    in_path: str,
-    out_path: str,
+    width: int,
+    height: int,
+    obstacles: List[Dict[str, float]],
     layout_data: Optional[Dict[str, Any]],
-) -> None:
-    """Render annotations using PyCairo engine."""
-    surface = cairo.ImageSurface.create_from_png(in_path)
-    width = surface.get_width()
-    height = surface.get_height()
-    ctx = cairo.Context(surface)
-
-    obstacles: List[Dict[str, float]] = []
-    if layout_data and layout_data.get("text_rects"):
-        obstacles.extend(layout_data["text_rects"])
-    else:
-        obstacles.extend(detect_cairo_surface_obstacles(surface))
-
-    for bx1, by1, bx2, by2 in _parse_boxes(args):
-        cairo_draw_bounding_highlight(ctx, bx1, by1, max(1.0, bx2 - bx1), max(1.0, by2 - by1))
-
+    badge_r_check: float,
+) -> Tuple[List[Tuple[float, float, float, float]], List[Dict[str, Any]], int]:
+    """Compute highlight boxes, collision-free arrows, and unresolved collision counts once."""
+    boxes_to_draw: List[Tuple[float, float, float, float]] = list(_parse_boxes(args))
     final_arrows: List[Dict[str, Any]] = []
     unresolved_collisions = 0
-    badge_r_check = 18.0
+    snap = getattr(args, "grid_snap", 10) or 10
 
-    if args.auto:
+    if getattr(args, "auto", False):
         targets_to_place: List[Dict[str, Any]] = []
         if layout_data and layout_data.get("target_boxes"):
             targets_to_place.extend(layout_data["target_boxes"])
 
-        for t_arg in args.target or []:
-            parts = [p.strip() for p in t_arg.split(",")]
-            if len(parts) >= 4:
-                targets_to_place.append(
-                    {
-                        "x1": float(parts[0]),
-                        "y1": float(parts[1]),
-                        "x2": float(parts[2]),
-                        "y2": float(parts[3]),
-                        "label": parts[4] if len(parts) > 4 else str(len(targets_to_place) + 1),
-                    }
-                )
+        for t_arg in getattr(args, "target", None) or []:
+            parsed = _parse_numeric_target(t_arg, str(len(targets_to_place) + 1))
+            if parsed:
+                targets_to_place.append(parsed)
 
-        if not targets_to_place and not args.arrow:
+        if not targets_to_place and not getattr(args, "arrow", None):
             print(
                 "[WARNING] --auto specified, but no target boxes found in layout sidecar (.layout.json) or --target flags. No auto arrows were placed."
             )
 
-        for t_box in targets_to_place:
-            obstacles.append(t_box)
+        obstacles.extend(targets_to_place)
 
         for target in targets_to_place:
             if getattr(args, "draw_target_boxes", False):
                 tx1, ty1 = min(target["x1"], target["x2"]), min(target["y1"], target["y2"])
                 tx2, ty2 = max(target["x1"], target["x2"]), max(target["y1"], target["y2"])
-                cairo_draw_bounding_highlight(ctx, tx1, ty1, max(1.0, tx2 - tx1), max(1.0, ty2 - ty1))
+                boxes_to_draw.append((tx1, ty1, tx2, ty2))
 
             lbl = str(target.get("label") or len(final_arrows) + 1)
             ax1, ay1, ax2, ay2 = find_optimal_arrow_placement(
@@ -722,7 +828,7 @@ def _cmd_annotate_cairo(
                 width,
                 height,
                 stroke_width=args.stroke_width,
-                grid_snap=getattr(args, "grid_snap", 10),
+                grid_snap=snap,
             )
             still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
                 ax1, ay1, ax2, ay2, badge_r_check, obstacles, target_box=target
@@ -732,7 +838,6 @@ def _cmd_annotate_cairo(
                 print(
                     f"[WARNING] Auto arrow '{lbl}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
                 )
-            cairo_draw_badge_and_arrow(ctx, ax1, ay1, ax2, ay2, lbl)
             obstacles.append(
                 {
                     "x1": min(ax1, ax2) - 15,
@@ -753,7 +858,7 @@ def _cmd_annotate_cairo(
                 }
             )
 
-    for arrow_spec in args.arrow or []:
+    for arrow_spec in getattr(args, "arrow", None) or []:
         parts = [p.strip() for p in arrow_spec.split(",")]
         if len(parts) not in (4, 5):
             raise ValueError(
@@ -763,10 +868,7 @@ def _cmd_annotate_cairo(
         label = parts[4] if len(parts) == 5 else ""
 
         badge_r = max(20, int(args.stroke_width * 2.5))
-        collided = _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles)
-
-        if collided and not args.allow_overlap:
-            snap = getattr(args, "grid_snap", 10) or 10
+        if _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles) and not args.allow_overlap:
             nudge_offsets = [
                 (0, -snap), (0, snap), (-snap, 0), (snap, 0),
                 (-snap, -snap), (snap, -snap), (-snap, snap), (snap, snap),
@@ -801,7 +903,7 @@ def _cmd_annotate_cairo(
                     width,
                     height,
                     stroke_width=args.stroke_width,
-                    grid_snap=getattr(args, "grid_snap", 10),
+                    grid_snap=snap,
                 )
                 print(
                     f"[AUTO-ADJUST] Arrow '{label}' adjusted from ({ax1:.0f},{ay1:.0f}) to ({new_x1:.0f},{new_y1:.0f}) to avoid text occlusion."
@@ -817,7 +919,6 @@ def _cmd_annotate_cairo(
                 f"[WARNING] Arrow '{label}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
             )
 
-        cairo_draw_badge_and_arrow(ctx, ax1, ay1, ax2, ay2, label)
         obstacles.append(
             {
                 "x1": min(ax1, ax2) - 15,
@@ -838,29 +939,50 @@ def _cmd_annotate_cairo(
             }
         )
 
-    surface.write_to_png(out_path)
+    return boxes_to_draw, final_arrows, unresolved_collisions
+
+
+def _write_arrows_audit(
+    out_path: str,
+    engine_name: str,
+    unresolved_collisions: int,
+    final_arrows: List[Dict[str, Any]],
+) -> None:
     arrows_audit = f"{os.path.splitext(out_path)[0]}.arrows.json"
     with open(arrows_audit, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "image": out_path,
-                "engine": "cairo",
+                "engine": engine_name,
                 "unresolved_collisions": unresolved_collisions,
                 "arrows": final_arrows,
             },
             f,
             indent=2,
         )
-
-    print(f"[OK] Annotated screenshot saved via Cairo to: {out_path}")
+    print(f"[OK] Annotated screenshot saved via {engine_name} to: {out_path}")
     print(f"[OK] Arrow coordinate audit saved to: {arrows_audit}")
 
 
-def cmd_annotate(args: argparse.Namespace) -> None:
-    """Draw arrows and callout badges onto a screenshot with text occlusion avoidance."""
+def _annotate_single_image(args: argparse.Namespace, in_raw: str, out_raw: str) -> None:
+    """Resolve rendering engine, plan collision-free annotations, and draw a single figure."""
+    in_path = validate_workspace_path(in_raw, must_exist=True)
+    out_path = validate_workspace_path(out_raw, must_exist=False)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     engine_choice = getattr(args, "engine", "auto").lower()
+    is_png = in_path.lower().endswith(".png")
     if engine_choice == "auto":
-        resolved_engine = "pillow" if HAVE_PIL else ("cairo" if HAVE_CAIRO else "none")
+        if HAVE_CAIRO and is_png:
+            resolved_engine = "cairo"
+        elif HAVE_PIL:
+            resolved_engine = "pillow"
+        elif HAVE_CAIRO:
+            resolved_engine = "cairo"
+        else:
+            resolved_engine = "none"
     elif engine_choice == "pillow":
         if not HAVE_PIL:
             sys.exit("Error: Pillow (PIL) is not installed.")
@@ -878,12 +1000,6 @@ def cmd_annotate(args: argparse.Namespace) -> None:
             "Install Pillow via pip, or pycairo (e.g. apt install python3-cairo), or place pre-annotated screenshots directly into docs/manual_book/assets/final/."
         )
 
-    in_path = validate_workspace_path(args.input, must_exist=True)
-    out_path = validate_workspace_path(args.output, must_exist=False)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
     layout_file = f"{os.path.splitext(in_path)[0]}.layout.json"
     layout_data: Optional[Dict[str, Any]] = None
     if os.path.exists(layout_file):
@@ -894,211 +1010,152 @@ def cmd_annotate(args: argparse.Namespace) -> None:
             layout_data = None
 
     if resolved_engine == "cairo":
-        _cmd_annotate_cairo(args, in_path, out_path, layout_data)
+        surface = cairo.ImageSurface.create_from_png(in_path)
+        width, height = surface.get_width(), surface.get_height()
+        ctx = cairo.Context(surface)
+        obstacles = (
+            list(layout_data["text_rects"])
+            if layout_data and layout_data.get("text_rects")
+            else detect_cairo_surface_obstacles(surface)
+        )
+        boxes_to_draw, final_arrows, unresolved = _resolve_annotations(
+            args, width, height, obstacles, layout_data, badge_r_check=18.0
+        )
+        for bx1, by1, bx2, by2 in boxes_to_draw:
+            cairo_draw_bounding_highlight(ctx, bx1, by1, max(1.0, bx2 - bx1), max(1.0, by2 - by1))
+        for arr in final_arrows:
+            cairo_draw_badge_and_arrow(ctx, arr["x1"], arr["y1"], arr["x2"], arr["y2"], arr["label"])
+        surface.write_to_png(out_path)
+        _write_arrows_audit(out_path, "cairo", unresolved, final_arrows)
         return
 
     with Image.open(in_path).convert("RGB") as img:
         width, height = img.size
         draw = ImageDraw.Draw(img)
-
-        obstacles: List[Dict[str, float]] = []
-        if layout_data and layout_data.get("text_rects"):
-            obstacles.extend(layout_data["text_rects"])
-        else:
-            dense_obstacles = detect_image_dense_obstacles(img)
-            obstacles.extend(dense_obstacles)
-
-        for bx1, by1, bx2, by2 in _parse_boxes(args):
-            draw.rectangle([bx1 - 2, by1 - 2, bx2 + 2, by2 + 2], outline=(255, 255, 255), width=7)
-            draw.rectangle([bx1, by1, bx2, by2], outline=(230, 30, 40), width=4)
-
-        final_arrows: List[Dict[str, Any]] = []
-        unresolved_collisions = 0
+        obstacles = (
+            list(layout_data["text_rects"])
+            if layout_data and layout_data.get("text_rects")
+            else detect_image_dense_obstacles(img)
+        )
         badge_r_check = max(20, int(args.stroke_width * 2.5))
-
-        if args.auto:
-            targets_to_place: List[Dict[str, Any]] = []
-            if layout_data and layout_data.get("target_boxes"):
-                targets_to_place.extend(layout_data["target_boxes"])
-
-            for t_arg in args.target or []:
-                parts = [p.strip() for p in t_arg.split(",")]
-                if len(parts) >= 4:
-                    targets_to_place.append(
-                        {
-                            "x1": float(parts[0]),
-                            "y1": float(parts[1]),
-                            "x2": float(parts[2]),
-                            "y2": float(parts[3]),
-                            "label": parts[4] if len(parts) > 4 else str(len(targets_to_place) + 1),
-                        }
-                    )
-
-            if not targets_to_place and not args.arrow:
-                print(
-                    "[WARNING] --auto specified, but no target boxes found in layout sidecar (.layout.json) or --target flags. No auto arrows were placed."
-                )
-
-            for t_box in targets_to_place:
-                obstacles.append(t_box)
-
-            for target in targets_to_place:
-                if getattr(args, "draw_target_boxes", False):
-                    tx1, ty1 = min(target["x1"], target["x2"]), min(target["y1"], target["y2"])
-                    tx2, ty2 = max(target["x1"], target["x2"]), max(target["y1"], target["y2"])
-                    draw.rectangle([tx1 - 2, ty1 - 2, tx2 + 2, ty2 + 2], outline=(255, 255, 255), width=7)
-                    draw.rectangle([tx1, ty1, tx2, ty2], outline=(230, 30, 40), width=4)
-
-                lbl = str(target.get("label") or len(final_arrows) + 1)
-                ax1, ay1, ax2, ay2 = find_optimal_arrow_placement(
-                    target,
-                    lbl,
-                    obstacles,
-                    width,
-                    height,
-                    stroke_width=args.stroke_width,
-                    grid_snap=getattr(args, "grid_snap", 10),
-                )
-                still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
-                    ax1, ay1, ax2, ay2, badge_r_check, obstacles, target_box=target
-                )
-                if still_collides:
-                    unresolved_collisions += 1
-                    print(
-                        f"[WARNING] Auto arrow '{lbl}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
-                    )
-                _draw_arrow_with_callout(
-                    draw, ax1, ay1, ax2, ay2, label=lbl, width=args.stroke_width
-                )
-                obstacles.append(
-                    {
-                        "x1": min(ax1, ax2) - 15,
-                        "y1": min(ay1, ay2) - 15,
-                        "x2": max(ax1, ax2) + 15,
-                        "y2": max(ay1, ay2) + 15,
-                    }
-                )
-                final_arrows.append(
-                    {
-                        "x1": ax1,
-                        "y1": ay1,
-                        "x2": ax2,
-                        "y2": ay2,
-                        "label": lbl,
-                        "auto": True,
-                        "collided": still_collides,
-                    }
-                )
-
-        for arrow_spec in args.arrow or []:
-            parts = [p.strip() for p in arrow_spec.split(",")]
-            if len(parts) not in (4, 5):
-                raise ValueError(
-                    f"Invalid --arrow format '{arrow_spec}'. Expected 'x1,y1,x2,y2' or 'x1,y1,x2,y2,label'."
-                )
-            ax1, ay1, ax2, ay2 = map(float, parts[:4])
-            label = parts[4] if len(parts) == 5 else ""
-
-            badge_r = max(20, int(args.stroke_width * 2.5))
-            collided = _arrow_hits_obstacles(ax1, ay1, ax2, ay2, badge_r, obstacles)
-
-            if collided and not args.allow_overlap:
-                snap = getattr(args, "grid_snap", 10) or 10
-                nudge_offsets = [
-                    (0, -snap), (0, snap), (-snap, 0), (snap, 0),
-                    (-snap, -snap), (snap, -snap), (-snap, snap), (snap, snap),
-                    (0, -2 * snap), (0, 2 * snap), (-2 * snap, 0), (2 * snap, 0),
-                ]
-                resolved_nudge = None
-                for dx, dy in nudge_offsets:
-                    test_x1, test_y1 = ax1 + dx, ay1 + dy
-                    if not (badge_r <= test_x1 <= width - badge_r and badge_r <= test_y1 <= height - badge_r):
-                        continue
-                    if not _arrow_hits_obstacles(test_x1, test_y1, ax2, ay2, badge_r + 4, obstacles):
-                        resolved_nudge = (test_x1, test_y1)
-                        break
-
-                if resolved_nudge:
-                    new_x1, new_y1 = resolved_nudge
-                    print(
-                        f"[GRID-NUDGE] Arrow '{label}' nudged along grid from ({ax1:.0f},{ay1:.0f}) to ({new_x1:.0f},{new_y1:.0f}) to avoid occlusion."
-                    )
-                    ax1, ay1 = new_x1, new_y1
-                else:
-                    fake_target = {
-                        "x1": ax2 - 10,
-                        "y1": ay2 - 10,
-                        "x2": ax2 + 10,
-                        "y2": ay2 + 10,
-                    }
-                    new_x1, new_y1, new_x2, new_y2 = find_optimal_arrow_placement(
-                        fake_target,
-                        label,
-                        obstacles,
-                        width,
-                        height,
-                        stroke_width=args.stroke_width,
-                        grid_snap=getattr(args, "grid_snap", 10),
-                    )
-                    print(
-                        f"[AUTO-ADJUST] Arrow '{label}' adjusted from ({ax1:.0f},{ay1:.0f}) to ({new_x1:.0f},{new_y1:.0f}) to avoid text occlusion."
-                    )
-                    ax1, ay1, ax2, ay2 = new_x1, new_y1, new_x2, new_y2
-
-            still_collides = (not args.allow_overlap) and _arrow_hits_obstacles(
-                ax1, ay1, ax2, ay2, badge_r_check, obstacles
-            )
-            if still_collides:
-                unresolved_collisions += 1
-                print(
-                    f"[WARNING] Arrow '{label}' at ({ax1:.0f},{ay1:.0f})->({ax2:.0f},{ay2:.0f}) still overlaps UI obstacles."
-                )
-
+        boxes_to_draw, final_arrows, unresolved = _resolve_annotations(
+            args, width, height, obstacles, layout_data, badge_r_check=badge_r_check
+        )
+        for bx1, by1, bx2, by2 in boxes_to_draw:
+            _draw_pillow_highlight_box(draw, bx1, by1, bx2, by2)
+        for arr in final_arrows:
             _draw_arrow_with_callout(
-                draw, ax1, ay1, ax2, ay2, label=label, width=args.stroke_width
+                draw, arr["x1"], arr["y1"], arr["x2"], arr["y2"], label=arr["label"], width=args.stroke_width
             )
-            obstacles.append(
-                {
-                    "x1": min(ax1, ax2) - 15,
-                    "y1": min(ay1, ay2) - 15,
-                    "x2": max(ax1, ax2) + 15,
-                    "y2": max(ay1, ay2) + 15,
-                }
-            )
-            final_arrows.append(
-                {
-                    "x1": ax1,
-                    "y1": ay1,
-                    "x2": ax2,
-                    "y2": ay2,
-                    "label": label,
-                    "auto": False,
-                    "collided": still_collides,
-                }
-            )
-
         img.save(out_path, quality=95)
+        _write_arrows_audit(out_path, "pillow", unresolved, final_arrows)
 
-        arrows_audit = f"{os.path.splitext(out_path)[0]}.arrows.json"
-        with open(arrows_audit, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "image": out_path,
-                    "engine": "pillow",
-                    "unresolved_collisions": unresolved_collisions,
-                    "arrows": final_arrows,
-                },
-                f,
-                indent=2,
-            )
 
-        print(f"[OK] Annotated screenshot saved to: {out_path}")
-        print(f"[OK] Arrow coordinate audit saved to: {arrows_audit}")
+def cmd_annotate(args: argparse.Namespace) -> None:
+    """Draw arrows and callout badges onto single screenshot or all figures in manual_spec.json."""
+    if not getattr(args, "spec", ""):
+        if not args.input or not args.output:
+            raise ValueError("Validation Error: Provide either --spec or both --input and --output.")
+        _annotate_single_image(args, args.input, args.output)
+        return
+
+    spec_path = validate_workspace_path(args.spec, must_exist=True)
+    spec_dir = os.path.dirname(spec_path)
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+
+    annotated_count = 0
+    for ch in spec.get("chapters", []):
+        for sec in ch.get("sections", []):
+            for fig in sec.get("figures", []):
+                src = fig.get("source") or {}
+                raw_rel = str(src.get("raw", "")).strip()
+                final_rel = str(fig.get("image_path", "")).strip()
+                if not raw_rel or not final_rel:
+                    continue
+                raw_path = _resolve_spec_asset(raw_rel, spec_dir, must_exist=False)
+                final_path = _resolve_spec_asset(final_rel, spec_dir, must_exist=False)
+                if not os.path.isfile(raw_path):
+                    print(f"[WARNING] Figure {fig.get('id', '?')}: raw screenshot missing at {raw_path}; skipping.")
+                    continue
+                if (
+                    not getattr(args, "force", False)
+                    and os.path.isfile(final_path)
+                    and os.path.getmtime(final_path) >= os.path.getmtime(raw_path)
+                ):
+                    continue
+
+                fig_args = argparse.Namespace(**vars(args))
+                spec_targets = [str(t) for t in src.get("targets", [])]
+                fig_args.target = list(args.target or []) + spec_targets
+                if not fig_args.auto and not fig_args.arrow:
+                    fig_args.auto = True
+                _annotate_single_image(fig_args, raw_path, final_path)
+                annotated_count += 1
+
+    print(f"[OK] Batch annotate completed ({annotated_count} figure(s) processed).")
+
+
+def cmd_batch(args: argparse.Namespace) -> None:
+    """Run batch capture (for missing URL screenshots) and batch auto-annotation from manual_spec.json."""
+    spec_path = validate_workspace_path(args.spec, must_exist=True)
+    pending_captures = _collect_capture_tasks_from_spec(spec_path, force=getattr(args, "force", False))
+    if pending_captures:
+        cmd_capture(args)
+    else:
+        print("[OK] Capture skipped: all spec figures with URLs already exist (use --force to recapture).")
+    ann_args = argparse.Namespace(**vars(args))
+    ann_args.auto = True
+    ann_args.target = None
+    ann_args.arrow = None
+    ann_args.box = None
+    ann_args.box_xywh = None
+    cmd_annotate(ann_args)
 
 
 # ---------------------------------------------------------
 # CLI Parser Setup
 # ---------------------------------------------------------
+def _add_capture_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--width", type=int, default=1440, help="Viewport width (default: 1440).")
+    p.add_argument("--height", type=int, default=900, help="Viewport height (default: 900).")
+    p.add_argument("--scale", type=int, default=2, choices=[1, 2, 3], help="Device scale factor (default: 2).")
+    p.add_argument("--full-page", action="store_true", help="Capture full scrollable page.")
+    p.add_argument("--wait-ms", type=int, default=500, help="Extra wait time in ms after networkidle.")
+    p.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds.")
+    p.add_argument(
+        "--mask-selectors",
+        default="input[type='password']",
+        help="Comma-separated CSS selectors to mask before screenshot.",
+    )
+
+
+def _add_annotate_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--draw-target-boxes",
+        action="store_true",
+        help="Draw highlight boxes around --target elements when using --auto.",
+    )
+    p.add_argument("--stroke-width", type=int, default=8, help="Arrow line thickness (default: 8).")
+    p.add_argument(
+        "--grid-snap",
+        type=int,
+        default=10,
+        help="Grid snapping interval in pixels for arrow placement (default: 10).",
+    )
+    p.add_argument(
+        "--engine",
+        choices=["auto", "pillow", "cairo"],
+        default="auto",
+        help="Rendering engine: 'auto' (PyCairo for PNG if available, else Pillow), 'pillow', or 'cairo'.",
+    )
+    p.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="Allow arrows to overlap text without auto-adjustment or error.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Safe High-DPI Screenshot Capture, Grid Overlay, and Collision-Free Arrow Annotator."
@@ -1106,20 +1163,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # capture subcommand
-    p_cap = sub.add_parser("capture", help="Auto-capture a high-DPI screenshot from a URL.")
-    p_cap.add_argument("--url", required=True, help="Target http:// or https:// URL.")
-    p_cap.add_argument("--output", required=True, help="Output image path inside workspace.")
-    p_cap.add_argument("--width", type=int, default=1440, help="Viewport width (default: 1440).")
-    p_cap.add_argument("--height", type=int, default=900, help="Viewport height (default: 900).")
-    p_cap.add_argument("--scale", type=int, default=2, choices=[1, 2, 3], help="Device scale factor (default: 2).")
-    p_cap.add_argument("--full-page", action="store_true", help="Capture full scrollable page.")
-    p_cap.add_argument("--wait-ms", type=int, default=500, help="Extra wait time in ms after networkidle.")
-    p_cap.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds.")
-    p_cap.add_argument(
-        "--mask-selectors",
-        default="input[type='password']",
-        help="Comma-separated CSS selectors to mask before screenshot.",
-    )
+    p_cap = sub.add_parser("capture", help="Auto-capture high-DPI screenshot(s) from a URL or manual_spec.json.")
+    p_cap.add_argument("--url", help="Target http:// or https:// URL.")
+    p_cap.add_argument("--output", help="Output image path inside workspace.")
+    p_cap.add_argument("--spec", help="Batch capture all figures with source.url from manual_spec.json.")
+    p_cap.add_argument("--force", action="store_true", help="Recapture existing raw screenshots when using --spec.")
+    _add_capture_args(p_cap)
     p_cap.add_argument(
         "--target",
         action="append",
@@ -1135,9 +1184,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_grid.set_defaults(func=cmd_grid)
 
     # annotate subcommand
-    p_ann = sub.add_parser("annotate", help="Draw arrows and callout badges onto a screenshot.")
-    p_ann.add_argument("--input", required=True, help="Path to clean screenshot.")
-    p_ann.add_argument("--output", required=True, help="Path to output annotated screenshot.")
+    p_ann = sub.add_parser("annotate", help="Draw arrows and callout badges onto a screenshot or manual_spec.json.")
+    p_ann.add_argument("--input", help="Path to clean screenshot.")
+    p_ann.add_argument("--output", help="Path to output annotated screenshot.")
+    p_ann.add_argument("--spec", help="Batch annotate all figures from manual_spec.json.")
+    p_ann.add_argument("--force", action="store_true", help="Re-annotate existing final screenshots when using --spec.")
     p_ann.add_argument(
         "--auto",
         action="store_true",
@@ -1147,11 +1198,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         action="append",
         help="Manual target box 'x1,y1,x2,y2[,label]'. Can be specified multiple times.",
-    )
-    p_ann.add_argument(
-        "--draw-target-boxes",
-        action="store_true",
-        help="Draw dashed highlight boxes around --target elements when using --auto.",
     )
     p_ann.add_argument(
         "--arrow",
@@ -1168,25 +1214,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Highlight box spec 'x,y,w,h'. Can be specified multiple times.",
     )
-    p_ann.add_argument("--stroke-width", type=int, default=8, help="Arrow line thickness (default: 8).")
-    p_ann.add_argument(
-        "--grid-snap",
-        type=int,
-        default=10,
-        help="Grid snapping interval in pixels for arrow placement (default: 10).",
-    )
-    p_ann.add_argument(
-        "--engine",
-        choices=["auto", "pillow", "cairo"],
-        default="auto",
-        help="Rendering engine: 'auto' (Pillow if available, else PyCairo), 'pillow', or 'cairo' (default: auto).",
-    )
-    p_ann.add_argument(
-        "--allow-overlap",
-        action="store_true",
-        help="Allow arrows to overlap text without auto-adjustment or error.",
-    )
+    _add_annotate_args(p_ann)
     p_ann.set_defaults(func=cmd_annotate)
+
+    # batch subcommand
+    p_batch = sub.add_parser("batch", help="Run batch capture and auto-annotation across manual_spec.json.")
+    p_batch.add_argument(
+        "--spec",
+        default="docs/manual_book/manual_spec.json",
+        help="Path to manual_spec.json (default: docs/manual_book/manual_spec.json).",
+    )
+    p_batch.add_argument("--force", action="store_true", help="Force recapture and re-annotation of existing assets.")
+    _add_capture_args(p_batch)
+    _add_annotate_args(p_batch)
+    p_batch.set_defaults(func=cmd_batch)
 
     return parser
 

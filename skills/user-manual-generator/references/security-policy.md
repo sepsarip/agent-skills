@@ -7,7 +7,7 @@ This policy governs how the agent and bundled Python scripts interact with the u
 ## 1. Sandbox-First & Virtual Environment Isolation
 
 - **Standard Sandbox Mode**: All script executions must run inside Standard Sandbox Mode (`BypassSandbox: false`) whenever possible.
-- **Isolated Virtual Environment**: If required dependencies (`Pillow`, `python-docx`, `playwright`, `pypdf`) are not installed on the system, scripts must be run inside a dedicated local virtual environment located inside the project workspace (e.g. `.venv-manual/`).
+- **Isolated Virtual Environment**: If optional dependencies (`Pillow`, `playwright`, `pypdf`) are not installed on the system, scripts must be run inside a dedicated local virtual environment located inside the project workspace (e.g. `.venv-manual/`).
 - **No Global System Pollution**: Never execute `sudo apt install`, global `pip install`, or bypass package management with `--break-system-packages` on the user's host OS.
 - **Non-Destructive File Operations**: Scripts never run recursive directory deletions (`rm -rf` or `shutil.rmtree`) on workspace data. Output updates automatically archive previous versions to `docs/manual_book/archive/<basename>_<timestamp>/`.
 

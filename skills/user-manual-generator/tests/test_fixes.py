@@ -4,7 +4,7 @@ Comprehensive automated test suite verifying fixes for:
 1. A4 image scaling bounds & center alignment for both image and caption.
 2. Compact arrow placement, guide grid snapping, and local anti-collision nudging.
 3. Offline and no-pip environment resilience in check_env.py.
-4. python-docx fallback (LibreOffice conversion & Markdown-only modes) without crashing.
+4. Stdlib OpenXML DOCX generation & Markdown-only modes without external dependencies.
 5. Flexible schema validation in manual_state.py coverage (arrays, dicts, strings).
 """
 
@@ -181,10 +181,10 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         self.assertIn("<em><b>Figure 1.1: Sample Screenshot</b></em>", md_content)
 
     # -------------------------------------------------------------
-    # 3. Issue 4: python-docx Hard Dependency & Fallback
+    # 3. Stdlib OpenXML DOCX & Markdown-Only Modes
     # -------------------------------------------------------------
     def test_build_manual_format_md_without_docx(self):
-        """Verify --format md builds cleanly without checking or crashing on python-docx."""
+        """Verify --format md builds cleanly without writing a DOCX output."""
         out_dir = os.path.join(self.tmp_dir, "out_md_only")
         cmd = [
             sys.executable,
@@ -204,7 +204,7 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(out_dir, "MarkdownOnly.docx")))
 
     def test_build_manual_all_format_with_libreoffice_fallback(self):
-        """Verify --format all produces both MD and DOCX via LibreOffice fallback without python-docx."""
+        """Verify --format all produces both MD and stdlib OpenXML DOCX with valid bookmarks and hyperlinks."""
         out_dir = os.path.join(self.tmp_dir, "out_all")
         cmd = [
             sys.executable,
@@ -295,7 +295,8 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0, f"check_env default failed: {res.stderr}")
         self.assertIn("VIABLE FOR CORE WORKFLOW", res.stdout)
-        self.assertIn("Word Export (.docx): READY (Engine: libreoffice)", res.stdout)
+        self.assertIn("Word Export (.docx): READY", res.stdout)
+        self.assertIn("stdlib-oxml", res.stdout)
 
         # Markdown profile run
         res_md = subprocess.run(
@@ -891,29 +892,20 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         self.assertIn("Table of Contents", doc_xml)
 
     def test_apply_a4_page_setup_margins_and_distances(self):
-        """Verify _apply_a4_page_setup sets 1-inch margins and 0.5-inch header/footer distance."""
-        from build_manual import _apply_a4_page_setup
+        """Verify _oxml_make_sect_pr sets A4 page dimensions, 1-inch margins, and 0.5-inch header/footer distance."""
+        from build_manual import _oxml_make_sect_pr, _w
 
-        class DummySection:
-            page_width = None
-            page_height = None
-            top_margin = None
-            bottom_margin = None
-            left_margin = None
-            right_margin = None
-            header_distance = None
-            footer_distance = None
-
-        sec = DummySection()
-        _apply_a4_page_setup(sec)
-        self.assertAlmostEqual(sec.page_width.inches, 8.27, places=2)
-        self.assertAlmostEqual(sec.page_height.inches, 11.69, places=2)
-        self.assertAlmostEqual(sec.top_margin.inches, 1.0, places=2)
-        self.assertAlmostEqual(sec.bottom_margin.inches, 1.0, places=2)
-        self.assertAlmostEqual(sec.left_margin.inches, 1.0, places=2)
-        self.assertAlmostEqual(sec.right_margin.inches, 1.0, places=2)
-        self.assertAlmostEqual(sec.header_distance.inches, 0.5, places=2)
-        self.assertAlmostEqual(sec.footer_distance.inches, 0.5, places=2)
+        sect_pr = _oxml_make_sect_pr(footer_rid="rIdFooterMain", num_fmt="decimal", num_start=1, is_next_page=True)
+        pg_sz = sect_pr.find(_w("pgSz"))
+        pg_mar = sect_pr.find(_w("pgMar"))
+        self.assertIsNotNone(pg_sz)
+        self.assertIsNotNone(pg_mar)
+        self.assertEqual(pg_sz.attrib.get(_w("w")), "11906")
+        self.assertEqual(pg_sz.attrib.get(_w("h")), "16838")
+        for side in ("top", "bottom", "left", "right"):
+            self.assertEqual(pg_mar.attrib.get(_w(side)), "1440")
+        self.assertEqual(pg_mar.attrib.get(_w("header")), "720")
+        self.assertEqual(pg_mar.attrib.get(_w("footer")), "720")
 
     def test_embed_images_constrains_height_and_width(self):
         """Verify embed_images_in_docx constrains both width (<= 5.8in) and height (<= 5.2in)."""
@@ -1419,6 +1411,164 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         )
         self.assertNotEqual(res_bad.returncode, 0, "mark --verified should fail when unresolved_collisions > 0")
         self.assertIn("unresolved", res_bad.stderr.lower())
+
+    def test_batch_annotate_from_spec(self):
+        """Verify capture_and_annotate.py annotate --auto --spec processes all figures in one invocation."""
+        import cairo
+
+        docs_dir = os.path.join(self.tmp_dir, "batch_docs")
+        raw_dir = os.path.join(docs_dir, "assets", "raw")
+        fin_dir = os.path.join(docs_dir, "assets", "final")
+        os.makedirs(raw_dir, exist_ok=True)
+
+        for name in ("fig1", "fig2"):
+            raw_p = os.path.join(raw_dir, f"{name}.png")
+            surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 600, 400)
+            ctx = cairo.Context(surf)
+            ctx.set_source_rgb(1.0, 1.0, 1.0)
+            ctx.paint()
+            surf.write_to_png(raw_p)
+            layout_p = os.path.join(raw_dir, f"{name}.layout.json")
+            with open(layout_p, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "text_rects": [],
+                        "target_boxes": [{"x1": 220, "y1": 160, "x2": 340, "y2": 200, "label": "1"}],
+                    },
+                    f,
+                )
+
+        batch_spec = {
+            "title": "Batch Spec",
+            "chapters": [
+                {
+                    "number": 1,
+                    "title": "Chapter 1",
+                    "sections": [
+                        {
+                            "number": "1.1",
+                            "title": "Sec 1",
+                            "body": "Body (See Figure 1.1) and (See Figure 1.2).",
+                            "figures": [
+                                {
+                                    "id": "1.1",
+                                    "title": "Fig 1",
+                                    "image_path": "assets/final/fig1.png",
+                                    "source": {"raw": "assets/raw/fig1.png"},
+                                },
+                                {
+                                    "id": "1.2",
+                                    "title": "Fig 2",
+                                    "image_path": "assets/final/fig2.png",
+                                    "source": {"raw": "assets/raw/fig2.png"},
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        spec_p = os.path.join(docs_dir, "manual_spec.json")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            json.dump(batch_spec, f)
+
+        cmd = [
+            sys.executable,
+            os.path.join(SCRIPTS_DIR, "capture_and_annotate.py"),
+            "annotate",
+            "--auto",
+            "--draw-target-boxes",
+            "--spec",
+            spec_p,
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, f"batch annotate failed: {res.stderr}\n{res.stdout}")
+        for name in ("fig1", "fig2"):
+            self.assertTrue(os.path.isfile(os.path.join(fin_dir, f"{name}.png")))
+            self.assertTrue(os.path.isfile(os.path.join(fin_dir, f"{name}.arrows.json")))
+
+    def test_mark_multiple_figures_verified(self):
+        """Verify manual_state.py mark accepts comma-separated --figure IDs in one call."""
+        docs_dir = os.path.join(self.tmp_dir, "multi_mark")
+        fin_dir = os.path.join(docs_dir, "assets", "final")
+        os.makedirs(fin_dir, exist_ok=True)
+        for name in ("a", "b"):
+            shutil.copy2(self.dummy_png, os.path.join(fin_dir, f"{name}.png"))
+            with open(os.path.join(fin_dir, f"{name}.arrows.json"), "w", encoding="utf-8") as f:
+                json.dump({"unresolved_collisions": 0, "arrows": []}, f)
+
+        spec_obj = json.loads(json.dumps(self.sample_spec))
+        spec_obj["chapters"][0]["sections"][0]["figures"] = [
+            {"id": "1.1", "title": "A", "image_path": "assets/final/a.png", "bullets": []},
+            {"id": "1.2", "title": "B", "image_path": "assets/final/b.png", "bullets": []},
+        ]
+        spec_p = os.path.join(docs_dir, "manual_spec.json")
+        prog_p = os.path.join(docs_dir, "manual_progress.json")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            json.dump(spec_obj, f)
+
+        res = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "manual_state.py"),
+                "mark",
+                "--progress",
+                prog_p,
+                "--spec",
+                spec_p,
+                "--figure",
+                "1.1,1.2",
+                "--verified",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"multi-figure mark failed: {res.stderr}")
+        with open(prog_p, "r", encoding="utf-8") as f:
+            prog = json.load(f)
+        self.assertTrue(prog["figures"]["1.1"]["verified"])
+        self.assertTrue(prog["figures"]["1.2"]["verified"])
+
+    def test_docx_multipara_and_callout_blockquote(self):
+        """Verify build_manual.py splits \\n\\n paragraphs and renders > callout blockquotes in DOCX."""
+        import zipfile
+
+        rich_spec = json.loads(json.dumps(self.sample_spec))
+        rich_spec["chapters"][0]["sections"][0]["body"] = (
+            "First paragraph explaining the screen.\n\n"
+            "> **Note:** Keep your password private (See Figure 1.1)."
+        )
+        spec_p = os.path.join(self.tmp_dir, "rich_spec.json")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            json.dump(rich_spec, f)
+
+        out_dir = os.path.join(self.tmp_dir, "rich_out")
+        res = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "build_manual.py"),
+                "--spec",
+                spec_p,
+                "--out-dir",
+                out_dir,
+                "--basename",
+                "RichManual",
+                "--format",
+                "docx",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"build_manual failed: {res.stderr}")
+        with zipfile.ZipFile(os.path.join(out_dir, "RichManual.docx"), "r") as zf:
+            doc_xml = zf.read("word/document.xml").decode("utf-8")
+        self.assertIn("First paragraph explaining the screen.", doc_xml)
+        self.assertIn("Keep your password private", doc_xml)
+        self.assertIn('w:fill="F8FAFC"', doc_xml)
+        self.assertIn('w:color="3B82F6"', doc_xml)
+        self.assertNotIn("&gt; **Note:**", doc_xml)
 
 
 if __name__ == "__main__":

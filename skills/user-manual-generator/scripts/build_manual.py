@@ -19,15 +19,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
-_scripts_dir = os.path.dirname(os.path.abspath(__file__))
-if _scripts_dir not in sys.path:
-    sys.path.insert(0, _scripts_dir)
-
-try:
-    from embed_images import embed_images_in_docx
-except ImportError:
-    embed_images_in_docx = None
-
 
 def validate_workspace_path(target_path: str, must_exist: bool = False) -> str:
     """Verify that target_path stays within the active workspace directory."""
@@ -67,20 +58,6 @@ def get_labels(lang: str) -> Dict[str, str]:
         "version": "Version",
         "date": "Last Updated",
     }
-
-
-def to_roman(n: int) -> str:
-    """Convert integer to lowercase Roman numeral (for front matter)."""
-    val = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
-    syb = ["m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i"]
-    roman_num = ""
-    i = 0
-    while n > 0:
-        for _ in range(n // val[i]):
-            roman_num += syb[i]
-            n -= val[i]
-        i += 1
-    return roman_num or "i"
 
 
 def resolve_spec_asset_path(
@@ -144,7 +121,9 @@ def ensure_citation_in_text(
         fig_id = str(fig.get("id", ""))
         citation_token = f"{labels['figure']} {fig_id}"
         if citation_token.lower() not in updated_body.lower():
-            updated_body += f" ({labels['see_figure']} {fig_id})."
+            last_line = updated_body.splitlines()[-1].lstrip() if updated_body else ""
+            sep = "\n\n" if (not updated_body or last_line.startswith(">")) else " "
+            updated_body = f"{updated_body}{sep}({labels['see_figure']} {fig_id}).".lstrip()
     return updated_body
 
 
@@ -289,203 +268,8 @@ def build_markdown(
 
 
 # ---------------------------------------------------------
-# DOCX Low-level XML Helpers (Bookmarks, Hyperlinks, PAGEREF, Leaders)
+# Inline Markdown & A4 Image / Page Setup Helpers
 # ---------------------------------------------------------
-def _create_bookmark_id() -> int:
-    global _CURRENT_BM_ID
-    _CURRENT_BM_ID += 1
-    return _CURRENT_BM_ID
-
-
-_CURRENT_BM_ID = 100
-
-
-def _add_bookmark_to_paragraph(paragraph: Any, bookmark_name: str) -> None:
-    """Enclose paragraph content in a Word bookmark (alphanumeric, no underscores)."""
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    bm_id = str(_create_bookmark_id())
-    bm_start = OxmlElement("w:bookmarkStart")
-    bm_start.set(qn("w:id"), bm_id)
-    bm_start.set(qn("w:name"), bookmark_name)
-
-    bm_end = OxmlElement("w:bookmarkEnd")
-    bm_end.set(qn("w:id"), bm_id)
-
-    # In ECMA-376 schema, w:pPr must be the first child of w:p.
-    # Therefore, insert bm_start immediately after pPr if present, else at index 0.
-    pPr = paragraph._p.pPr
-    if pPr is not None:
-        pPr.addnext(bm_start)
-    else:
-        paragraph._p.insert(0, bm_start)
-    paragraph._p.append(bm_end)
-
-
-def _add_toc_entry_hyperlink(
-    paragraph: Any,
-    bookmark_name: str,
-    title_text: str,
-    page_str: str,
-    is_bold: bool = False,
-    indent_level: int = 0,
-    tab_pos_dxa: int = 9029,
-) -> None:
-    """
-    Construct a clickable TOC entry pointing to bookmark_name with dot leader and PAGEREF.
-    """
-    from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    from docx.shared import Inches, Pt, RGBColor
-
-    p = paragraph._p
-    pPr = paragraph._element.get_or_add_pPr()
-
-    # Indentation
-    if indent_level > 0:
-        ind = OxmlElement("w:ind")
-        ind.set(qn("w:left"), str(int(indent_level * 360)))  # ~0.25 inch per level
-        pPr.append(ind)
-
-    # Right-aligned tab stop with dot leader matching printable margin boundary (9029 dxa = 6.27 inches for A4)
-    tabs = OxmlElement("w:tabs")
-    tab = OxmlElement("w:tab")
-    tab.set(qn("w:val"), "right")
-    tab.set(qn("w:leader"), "dot")
-    tab.set(qn("w:pos"), str(tab_pos_dxa))
-    tabs.append(tab)
-    pPr.append(tabs)
-
-    # Create Hyperlink element: <w:hyperlink w:anchor="bookmark_name">
-    hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("w:anchor"), bookmark_name)
-    hyperlink.set(qn("w:history"), "1")
-
-    # Run for Title Text
-    r_text = OxmlElement("w:r")
-    rPr_text = OxmlElement("w:rPr")
-    if is_bold:
-        b = OxmlElement("w:b")
-        rPr_text.append(b)
-    sz = OxmlElement("w:sz")
-    sz.set(qn("w:val"), "21")  # 10.5 pt
-    rPr_text.append(sz)
-    col = OxmlElement("w:color")
-    col.set(qn("w:val"), "0F172A")
-    rPr_text.append(col)
-    r_text.append(rPr_text)
-
-    t_text = OxmlElement("w:t")
-    t_text.text = title_text
-    r_text.append(t_text)
-    hyperlink.append(r_text)
-
-    # Run for Dot Leader Tab
-    r_tab = OxmlElement("w:r")
-    rPr_tab = OxmlElement("w:rPr")
-    r_tab.append(rPr_tab)
-    tab_elem = OxmlElement("w:tab")
-    r_tab.append(tab_elem)
-    hyperlink.append(r_tab)
-
-    # Complex Field for PAGEREF:
-    # 1. <w:fldChar w:fldCharType="begin"/>
-    # 2. <w:instrText>PAGEREF bookmark_name \h</w:instrText>
-    # 3. <w:fldChar w:fldCharType="separate"/>
-    # 4. <w:t>page_str</w:t> (cached page number)
-    # 5. <w:fldChar w:fldCharType="end"/>
-    r_fld_begin = OxmlElement("w:r")
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    r_fld_begin.append(fld_begin)
-    hyperlink.append(r_fld_begin)
-
-    r_instr = OxmlElement("w:r")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = f'PAGEREF {bookmark_name} \\h'
-    r_instr.append(instr)
-    hyperlink.append(r_instr)
-
-    r_fld_sep = OxmlElement("w:r")
-    fld_sep = OxmlElement("w:fldChar")
-    fld_sep.set(qn("w:fldCharType"), "separate")
-    r_fld_sep.append(fld_sep)
-    hyperlink.append(r_fld_sep)
-
-    r_page = OxmlElement("w:r")
-    rPr_page = OxmlElement("w:rPr")
-    if is_bold:
-        b_page = OxmlElement("w:b")
-        rPr_page.append(b_page)
-    sz_page = OxmlElement("w:sz")
-    sz_page.set(qn("w:val"), "21")
-    rPr_page.append(sz_page)
-    r_page.append(rPr_page)
-    t_page = OxmlElement("w:t")
-    t_page.text = str(page_str)
-    r_page.append(t_page)
-    hyperlink.append(r_page)
-
-    r_fld_end = OxmlElement("w:r")
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    r_fld_end.append(fld_end)
-    hyperlink.append(r_fld_end)
-
-    p.append(hyperlink)
-
-
-def _add_page_number_only_footer(section: Any) -> None:
-    """Attach single PAGE number field to footer, right-aligned (just *X*)."""
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    footer = section.footer
-    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-    p.text = ""
-    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
-    fld_page = OxmlElement("w:fldSimple")
-    fld_page.set(qn("w:instr"), "PAGE")
-
-    r = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-    sz = OxmlElement("w:sz")
-    sz.set(qn("w:val"), "18")  # 9 pt
-    rPr.append(sz)
-    col = OxmlElement("w:color")
-    col.set(qn("w:val"), "64748B")
-    rPr.append(col)
-    r.append(rPr)
-    t = OxmlElement("w:t")
-    t.text = "1"
-    r.append(t)
-    fld_page.append(r)
-
-    p._p.append(fld_page)
-
-
-def format_inline_markdown_html(text: str) -> str:
-    """Convert inline markdown formatting (**bold**, *italic*, `code`) to HTML tags."""
-    if not text:
-        return ""
-    import html
-    escaped = html.escape(text)
-    # **bold** or __bold__
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
-    # *italic* or _italic_
-    escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
-    escaped = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", escaped)
-    # `code`
-    escaped = re.sub(r"`(.+?)`", r"<code>\1</code>", escaped)
-    return escaped
-
-
 def _tokenize_inline_markdown(text: str) -> List[Tuple[str, bool, bool, bool]]:
     """
     Tokenize inline markdown into (segment_text, is_bold, is_italic, is_code) tuples
@@ -512,32 +296,6 @@ def _tokenize_inline_markdown(text: str) -> List[Tuple[str, bool, bool, bool]]:
     return out
 
 
-def _add_formatted_runs(paragraph: Any, text: str) -> None:
-    """Parse **bold**, *italic*, and `code` segments into Word formatted runs."""
-    for seg, is_bold, is_italic, is_code in _tokenize_inline_markdown(text):
-        run = paragraph.add_run(seg)
-        if is_bold:
-            run.bold = True
-        if is_italic:
-            run.italic = True
-        if is_code:
-            run.font.name = "Consolas"
-
-
-def _enable_word_update_fields(doc: Any) -> None:
-    """Enable w:updateFields in word/settings.xml so MS Word recomputes fields on open."""
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    settings = doc.settings._element
-    update_fields = OxmlElement("w:updateFields")
-    update_fields.set(qn("w:val"), "true")
-    settings.append(update_fields)
-
-
-# ---------------------------------------------------------
-# DOCX Document Construction & A4 Layout Helpers
-# ---------------------------------------------------------
 def _read_image_pixel_size(img_path: str) -> Tuple[int, int]:
     """Read (width, height) in pixels from PNG, JPEG, or WebP headers using stdlib (or Pillow if available)."""
     try:
@@ -624,276 +382,6 @@ def _calc_a4_image_dimensions(
         w = max_h * aspect
 
     return round(w, 3), round(h, 3)
-
-
-def _apply_a4_page_setup(sec: Any) -> None:
-    """Set standard A4 page dimensions (210mm x 297mm), 1.0 inch margins, and 0.5 inch header/footer distances."""
-    try:
-        from docx.shared import Inches
-    except ImportError:
-        class Inches:
-            def __init__(self, val: float):
-                self.inches = val
-                self.val = val
-
-            def __repr__(self):
-                return f"Inches({self.inches})"
-    sec.page_width = Inches(8.27)
-    sec.page_height = Inches(11.69)
-    sec.top_margin = Inches(1.0)
-    sec.bottom_margin = Inches(1.0)
-    sec.left_margin = Inches(1.0)
-    sec.right_margin = Inches(1.0)
-    sec.header_distance = Inches(0.5)
-    sec.footer_distance = Inches(0.5)
-
-
-def build_docx_internal(
-    spec: Dict[str, Any],
-    docx_path: str,
-    page_map: Optional[Dict[str, str]] = None,
-    enable_update_prompt: bool = True,
-    spec_dir: Optional[str] = None,
-    out_dir: Optional[str] = None,
-) -> None:
-    """Build Word .docx document with exact sections, bookmarks, and cached page numbers."""
-    try:
-        from docx import Document
-        from docx.enum.section import WD_SECTION
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        from docx.shared import Inches, Pt, RGBColor
-    except ImportError:
-        raise ImportError("python-docx is required. Run: pip install python-docx")
-
-    labels = get_labels(spec.get("language", "en"))
-    chapters = spec.get("chapters", [])
-    page_map = page_map or {}
-
-    doc = Document()
-    if enable_update_prompt:
-        try:
-            _enable_word_update_fields(doc)
-        except Exception:
-            pass
-
-    # =========================================================
-    # Section 1: Cover Page (No footer, no page number)
-    # =========================================================
-    sec_cover = doc.sections[0]
-    _apply_a4_page_setup(sec_cover)
-    sec_cover.different_first_page_header_footer = True
-    if sec_cover.header.paragraphs:
-        sec_cover.header.paragraphs[0].text = ""
-    first_page_header = sec_cover.first_page_header
-    if first_page_header.paragraphs:
-        first_page_header.paragraphs[0].text = ""
-    first_page_footer = sec_cover.first_page_footer
-    if first_page_footer.paragraphs:
-        first_page_footer.paragraphs[0].text = ""
-
-    # Cover Logo or Placeholder Box
-    logo_path = spec.get("logo_path")
-    has_logo_file = False
-    if logo_path:
-        try:
-            real_logo = resolve_spec_asset_path(
-                logo_path, spec_dir=spec_dir, out_dir=out_dir, must_exist=True
-            )
-            logo_p = doc.add_paragraph()
-            logo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            logo_p.paragraph_format.space_before = Pt(36)
-            logo_p.paragraph_format.space_after = Pt(24)
-            logo_p.add_run().add_picture(real_logo, width=Inches(2.4))
-            has_logo_file = True
-        except Exception:
-            has_logo_file = False
-
-    if not has_logo_file:
-        logo_p = doc.add_paragraph(labels["logo_placeholder"])
-        logo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        logo_p.paragraph_format.space_before = Pt(36)
-        logo_p.paragraph_format.space_after = Pt(24)
-        run_logo = logo_p.runs[0]
-        run_logo.bold = True
-        run_logo.font.size = Pt(13)
-        run_logo.font.color.rgb = RGBColor(148, 163, 184)
-
-    # Cover Title & Metadata
-    title_p = doc.add_paragraph()
-    title_p.paragraph_format.space_before = Pt(24)
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run(spec.get("title", labels["default_title"]))
-    title_run.bold = True
-    title_run.font.size = Pt(26)
-    title_run.font.color.rgb = RGBColor(15, 23, 42)
-
-    if spec.get("subtitle"):
-        sub_p = doc.add_paragraph()
-        sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        sub_run = sub_p.add_run(spec["subtitle"])
-        sub_run.font.size = Pt(13)
-        sub_run.font.color.rgb = RGBColor(71, 85, 105)
-
-    meta_parts = []
-    if spec.get("version"):
-        meta_parts.append(f"{labels['version']}: {spec['version']}")
-    if spec.get("date"):
-        meta_parts.append(f"{labels['date']}: {spec['date']}")
-    if meta_parts:
-        meta_p = doc.add_paragraph(" | ".join(meta_parts))
-        meta_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        meta_p.paragraph_format.space_before = Pt(140)
-        meta_p.runs[0].font.size = Pt(10)
-        meta_p.runs[0].font.color.rgb = RGBColor(100, 116, 139)
-
-    # =========================================================
-    # Section 2: Front Matter (TOC) - Roman Numerals
-    # =========================================================
-    sec_front = doc.add_section(WD_SECTION.NEW_PAGE)
-    _apply_a4_page_setup(sec_front)
-    sec_front.header.is_linked_to_previous = False
-    if sec_front.header.paragraphs:
-        sec_front.header.paragraphs[0].text = ""
-    sec_front.footer.is_linked_to_previous = False
-    sectPr_front = sec_front._sectPr
-    pgNum_front = OxmlElement("w:pgNumType")
-    pgNum_front.set(qn("w:fmt"), "lowerRoman")
-    pgNum_front.set(qn("w:start"), "1")
-    sectPr_front.append(pgNum_front)
-    _add_page_number_only_footer(sec_front)
-
-    toc_heading = doc.add_heading(labels["toc"], level=1)
-    toc_heading.paragraph_format.space_after = Pt(12)
-
-    for ch_idx, ch in enumerate(chapters, start=1):
-        ch_num = ch.get("number", ch_idx)
-        ch_title = ch.get("title", "")
-        ch_bm = f"umgCh{ch_num}"
-        ch_page = page_map.get(ch_bm, "1")
-
-        p_ch = doc.add_paragraph()
-        p_ch.paragraph_format.space_before = Pt(6)
-        p_ch.paragraph_format.space_after = Pt(2)
-        _add_toc_entry_hyperlink(
-            p_ch,
-            bookmark_name=ch_bm,
-            title_text=f"{labels['chapter']} {ch_num}: {ch_title}",
-            page_str=ch_page,
-            is_bold=True,
-            indent_level=0,
-            tab_pos_dxa=9026,
-        )
-
-        for sec_idx, sec in enumerate(ch.get("sections", []), start=1):
-            sec_num = sec.get("number", f"{ch_num}.{sec_idx}")
-            sec_title = sec.get("title", "")
-            sec_slug = re.sub(r"[^\w]", "", sec_num)
-            sec_bm = f"umgSec{sec_slug}"
-            sec_page = page_map.get(sec_bm, ch_page)
-
-            p_sec = doc.add_paragraph()
-            p_sec.paragraph_format.space_before = Pt(1)
-            p_sec.paragraph_format.space_after = Pt(1)
-            _add_toc_entry_hyperlink(
-                p_sec,
-                bookmark_name=sec_bm,
-                title_text=f"{sec_num} {sec_title}",
-                page_str=sec_page,
-                is_bold=False,
-                indent_level=1,
-                tab_pos_dxa=9026,
-            )
-
-    # =========================================================
-    # Section 3: Main Chapters - Arabic Numerals (1, 2, 3...)
-    # =========================================================
-    sec_main = doc.add_section(WD_SECTION.NEW_PAGE)
-    _apply_a4_page_setup(sec_main)
-    sec_main.header.is_linked_to_previous = False
-    if sec_main.header.paragraphs:
-        sec_main.header.paragraphs[0].text = ""
-    sec_main.footer.is_linked_to_previous = False
-    sectPr_main = sec_main._sectPr
-    pgNum_main = OxmlElement("w:pgNumType")
-    pgNum_main.set(qn("w:fmt"), "decimal")
-    pgNum_main.set(qn("w:start"), "1")
-    sectPr_main.append(pgNum_main)
-    _add_page_number_only_footer(sec_main)
-
-    for idx, ch in enumerate(chapters, start=1):
-        ch_num = ch.get("number", idx)
-        ch_title = ch.get("title", "")
-        ch_bm = f"umgCh{ch_num}"
-
-        h1 = doc.add_heading(f"{labels['chapter']} {ch_num}: {ch_title}", level=1)
-        h1.paragraph_format.keep_with_next = True
-        _add_bookmark_to_paragraph(h1, ch_bm)
-
-        if ch.get("intro"):
-            intro_p = doc.add_paragraph()
-            intro_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            _add_formatted_runs(intro_p, ch["intro"])
-
-        ch_fig_counter = 0
-        for sec_idx, sec in enumerate(ch.get("sections", []), start=1):
-            sec_num = sec.get("number", f"{ch_num}.{sec_idx}")
-            sec_title = sec.get("title", "")
-            sec_slug = re.sub(r"[^\w]", "", sec_num)
-            sec_bm = f"umgSec{sec_slug}"
-
-            figures = sec.get("figures", [])
-            body_text = ensure_citation_in_text(sec.get("body", ""), figures, labels)
-
-            h2 = doc.add_heading(f"{sec_num} {sec_title}", level=2)
-            h2.paragraph_format.keep_with_next = True
-            _add_bookmark_to_paragraph(h2, sec_bm)
-
-            body_p = doc.add_paragraph()
-            body_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            if figures:
-                body_p.paragraph_format.keep_with_next = True
-            _add_formatted_runs(body_p, body_text)
-
-            for fig in figures:
-                ch_fig_counter += 1
-                fig_id = str(fig.get("id", f"{ch_num}.{ch_fig_counter}"))
-                fig_title = fig.get("title", "")
-                fig_slug = re.sub(r"[^\w]", "", fig_id)
-                fig_bm = f"umgFig{fig_slug}"
-
-                img_path = fig.get("image_path", "")
-                if img_path:
-                    real_img = resolve_spec_asset_path(
-                        img_path, spec_dir=spec_dir, out_dir=out_dir, must_exist=True
-                    )
-                    img_w_in, img_h_in = _calc_a4_image_dimensions(real_img, max_w=5.4, max_h=3.4)
-                    img_p = doc.add_paragraph()
-                    img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    img_p.paragraph_format.keep_with_next = True
-                    img_p.add_run().add_picture(real_img, width=Inches(img_w_in), height=Inches(img_h_in))
-
-                cap_p = doc.add_paragraph()
-                cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                cap_p.paragraph_format.keep_with_next = bool(fig.get("bullets"))
-                cap_run = cap_p.add_run(f"{labels['figure']} {fig_id}: {fig_title}")
-                cap_run.italic = True
-                cap_run.bold = True
-                cap_run.font.size = Pt(10)
-                cap_run.font.color.rgb = RGBColor(51, 65, 85)
-                _add_bookmark_to_paragraph(cap_p, fig_bm)
-
-                for bullet in fig.get("bullets", []):
-                    b_p = doc.add_paragraph(style="List Bullet")
-                    b_p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                    b_p.paragraph_format.keep_together = True
-                    _add_formatted_runs(b_p, bullet)
-
-        if idx < len(chapters):
-            doc.add_page_break()
-
-    doc.save(docx_path)
 
 
 # ---------------------------------------------------------
@@ -1026,12 +514,51 @@ def _extract_pdf_page_texts(pdf_path: str) -> List[str]:
     return []
 
 
+def _extract_named_dest_pages_pypdf(pdf_path: str) -> Optional[Dict[str, int]]:
+    """Extract 0-based page index per named destination bookmark using pypdf when installed."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return None
+    try:
+        reader = PdfReader(pdf_path)
+        dest_map: Dict[str, int] = {}
+        named = getattr(reader, "named_destinations", {}) or {}
+        for name, dest in named.items():
+            pg_idx = reader.get_destination_page_number(dest)
+            if pg_idx is not None:
+                dest_map[str(name).lstrip("/")] = pg_idx
+        return dest_map
+    except Exception:
+        return None
+
+
+def _find_heading_page(
+    target_phrase: str,
+    raw_pages_lower: List[str],
+    page_texts: List[str],
+    start_idx: int,
+) -> Optional[int]:
+    """Locate 0-based page index of heading, preferring line-start matches before substring matches."""
+    if not target_phrase:
+        return None
+    line_pat = re.compile(rf"(?:^|\n)\s*{re.escape(target_phrase)}\b")
+    for p_idx in range(start_idx, len(raw_pages_lower)):
+        collapsed_lines = re.sub(r"[ \t]+", " ", raw_pages_lower[p_idx])
+        if line_pat.search(collapsed_lines):
+            return p_idx
+    for p_idx in range(start_idx, len(page_texts)):
+        if target_phrase in page_texts[p_idx]:
+            return p_idx
+    return None
+
+
 def extract_page_map_from_pdf(
     pdf_path: str, spec: Dict[str, Any]
 ) -> Dict[str, str]:
     """
     Extract exact page numbers for each chapter, section, and figure bookmark
-    from the rendered PDF (via pypdf or pdftotext fallback).
+    from the rendered PDF (via pypdf named destinations or line-anchored pdftotext fallback).
     """
     raw_pages = _extract_pdf_page_texts(pdf_path)
     if not raw_pages:
@@ -1043,7 +570,9 @@ def extract_page_map_from_pdf(
     def _clean_ws(s: str) -> str:
         return re.sub(r"\s+", " ", s).strip().lower()
 
+    raw_pages_lower = [txt.lower() for txt in raw_pages]
     page_texts = [_clean_ws(txt) for txt in raw_pages]
+    dest_pages = _extract_named_dest_pages_pypdf(pdf_path) or {}
 
     chapters = spec.get("chapters", [])
     first_ch_num = chapters[0].get("number", 1) if chapters else 1
@@ -1053,14 +582,16 @@ def extract_page_map_from_pdf(
     toc_label = _clean_ws(labels["toc"])
 
     main_start_page_idx = 1
-    for idx, text in enumerate(page_texts):
-        if idx == 0:
-            continue
-        if toc_label in text:
-            continue
-        if (first_ch_full and first_ch_full in text) or (first_ch_short in text):
-            main_start_page_idx = idx
-            break
+    first_bm = f"umgCh{first_ch_num}"
+    if first_bm in dest_pages and dest_pages[first_bm] >= 1:
+        main_start_page_idx = dest_pages[first_bm]
+    else:
+        for idx, text in enumerate(page_texts):
+            if idx == 0 or toc_label in text:
+                continue
+            if (first_ch_full and first_ch_full in text) or (first_ch_short in text):
+                main_start_page_idx = idx
+                break
 
     for ch_idx, ch in enumerate(chapters, start=1):
         ch_num = ch.get("number", ch_idx)
@@ -1069,14 +600,12 @@ def extract_page_map_from_pdf(
         target_phrase = _clean_ws(f"{labels['chapter']} {ch_num}: {ch_title}")
 
         ch_page_idx = main_start_page_idx
-        found_page = None
-        for p_idx in range(main_start_page_idx, len(page_texts)):
-            if target_phrase in page_texts[p_idx]:
-                ch_page_idx = p_idx
-                found_page = str(p_idx - main_start_page_idx + 1)
-                break
-        if found_page:
-            page_map[ch_bm] = found_page
+        p_idx = dest_pages.get(ch_bm)
+        if p_idx is None or p_idx < main_start_page_idx:
+            p_idx = _find_heading_page(target_phrase, raw_pages_lower, page_texts, main_start_page_idx)
+        if p_idx is not None:
+            ch_page_idx = p_idx
+            page_map[ch_bm] = str(p_idx - main_start_page_idx + 1)
 
         ch_fig_counter = 0
         sec_search_start = ch_page_idx
@@ -1087,14 +616,12 @@ def extract_page_map_from_pdf(
             sec_bm = f"umgSec{sec_slug}"
             target_sec = _clean_ws(f"{sec_num} {sec_title}")
 
-            sec_found = None
-            for p_idx in range(sec_search_start, len(page_texts)):
-                if target_sec in page_texts[p_idx]:
-                    sec_search_start = p_idx
-                    sec_found = str(p_idx - main_start_page_idx + 1)
-                    break
-            if sec_found:
-                page_map[sec_bm] = sec_found
+            sp_idx = dest_pages.get(sec_bm)
+            if sp_idx is None or sp_idx < main_start_page_idx:
+                sp_idx = _find_heading_page(target_sec, raw_pages_lower, page_texts, sec_search_start)
+            if sp_idx is not None:
+                sec_search_start = sp_idx
+                page_map[sec_bm] = str(sp_idx - main_start_page_idx + 1)
 
             for fig in sec.get("figures", []):
                 ch_fig_counter += 1
@@ -1104,13 +631,11 @@ def extract_page_map_from_pdf(
                 fig_bm = f"umgFig{fig_slug}"
                 target_fig = _clean_ws(f"{labels['figure']} {fig_id}: {fig_title}")
 
-                fig_found = None
-                for p_idx in range(sec_search_start, len(page_texts)):
-                    if target_fig in page_texts[p_idx]:
-                        fig_found = str(p_idx - main_start_page_idx + 1)
-                        break
-                if fig_found:
-                    page_map[fig_bm] = fig_found
+                fp_idx = dest_pages.get(fig_bm)
+                if fp_idx is None or fp_idx < main_start_page_idx:
+                    fp_idx = _find_heading_page(target_fig, raw_pages_lower, page_texts, sec_search_start)
+                if fp_idx is not None:
+                    page_map[fig_bm] = str(fp_idx - main_start_page_idx + 1)
 
     return page_map
 
@@ -1306,6 +831,55 @@ def _oxml_add_inline_picture(
         ET.SubElement(s_fill, _a("srgbClr"), {"val": "CBD5E1"})
 
 
+def _oxml_append_prose_paragraphs(
+    body: ET.Element,
+    text: str,
+    before_dxa: str = "0",
+    after_dxa: str = "100",
+    keep_last_with_next: bool = False,
+) -> None:
+    """Split prose on blank lines into justified paragraphs and styled callout blockquotes."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", str(text).strip()) if b.strip()]
+    for idx, block in enumerate(blocks):
+        is_last = idx == len(blocks) - 1
+        is_callout = all(line.lstrip().startswith(">") for line in block.splitlines())
+        p_el = ET.SubElement(body, _w("p"))
+        p_pr = ET.SubElement(p_el, _w("pPr"))
+        if is_last and keep_last_with_next:
+            ET.SubElement(p_pr, _w("keepNext"))
+        if is_callout:
+            p_bdr = ET.SubElement(p_pr, _w("pBdr"))
+            ET.SubElement(
+                p_bdr,
+                _w("left"),
+                {_w("val"): "single", _w("sz"): "18", _w("space"): "8", _w("color"): "3B82F6"},
+            )
+            ET.SubElement(
+                p_pr,
+                _w("shd"),
+                {_w("val"): "clear", _w("color"): "auto", _w("fill"): "F8FAFC"},
+            )
+        ET.SubElement(
+            p_pr,
+            _w("spacing"),
+            {
+                _w("before"): "60" if is_callout else before_dxa,
+                _w("after"): after_dxa,
+                _w("line"): "288",
+                _w("lineRule"): "auto",
+            },
+        )
+        if is_callout:
+            ET.SubElement(p_pr, _w("ind"), {_w("left"): "240", _w("right"): "240"})
+        ET.SubElement(p_pr, _w("jc"), {_w("val"): "both"})
+        clean_block = (
+            re.sub(r"^\s*>\s?", "", block, flags=re.MULTILINE).replace("\n", " ").strip()
+            if is_callout
+            else block.replace("\n", " ")
+        )
+        _oxml_add_markdown_runs(p_el, clean_block, sz_half_pt=21)
+
+
 def _oxml_footer_bytes() -> bytes:
     ftr = ET.Element(_w("ftr"))
     p = ET.SubElement(ftr, _w("p"))
@@ -1328,7 +902,7 @@ def build_docx_stdlib_oxml(
 ) -> bool:
     """
     Build a publication-grade multi-section ECMA-376 OpenXML (.docx) package
-    using 100% Python standard library (zero python-docx or HTML import limitations):
+    using 100% Python standard library (zero external dependencies):
       - Section 1: Cover page within A4 margins, no footer/page number.
       - Section 2: Table of Contents with lowerRoman numbering ('i'), dot leaders
         at 9026 dxa, 360 dxa subsection indentation, hyperlinks, and PAGEREF fields.
@@ -1598,15 +1172,9 @@ def build_docx_stdlib_oxml(
         _oxml_wrap_bookmark(p_ch, next_bm_id, ch_bm)
 
         if ch.get("intro"):
-            p_intro = ET.SubElement(body, _w("p"))
-            pi_pr = ET.SubElement(p_intro, _w("pPr"))
-            ET.SubElement(pi_pr, _w("jc"), {_w("val"): "both"})
-            ET.SubElement(
-                pi_pr,
-                _w("spacing"),
-                {_w("before"): "40", _w("after"): "120", _w("line"): "288", _w("lineRule"): "auto"},
+            _oxml_append_prose_paragraphs(
+                body, str(ch["intro"]), before_dxa="40", after_dxa="120"
             )
-            _oxml_add_markdown_runs(p_intro, str(ch["intro"]), sz_half_pt=21)
 
         ch_fig_counter = 0
         for sec_idx, sec in enumerate(ch.get("sections", []), start=1):
@@ -1634,22 +1202,9 @@ def build_docx_stdlib_oxml(
             _oxml_wrap_bookmark(p_sec, next_bm_id, sec_bm)
 
             if body_text:
-                p_body = ET.SubElement(body, _w("p"))
-                pb_pr = ET.SubElement(p_body, _w("pPr"))
-                ET.SubElement(pb_pr, _w("jc"), {_w("val"): "both"})
-                if figures:
-                    ET.SubElement(pb_pr, _w("keepNext"))
-                ET.SubElement(
-                    pb_pr,
-                    _w("spacing"),
-                    {
-                        _w("before"): "0",
-                        _w("after"): "100",
-                        _w("line"): "288",
-                        _w("lineRule"): "auto",
-                    },
+                _oxml_append_prose_paragraphs(
+                    body, body_text, before_dxa="0", after_dxa="100", keep_last_with_next=bool(figures)
                 )
-                _oxml_add_markdown_runs(p_body, body_text, sz_half_pt=21)
 
             for fig in figures:
                 ch_fig_counter += 1
@@ -1838,6 +1393,9 @@ def build_docx_stdlib_oxml(
     return True
 
 
+build_docx_internal = build_docx_stdlib_oxml
+
+
 def build_docx_2pass(
     spec: Dict[str, Any],
     docx_path: str,
@@ -1845,42 +1403,26 @@ def build_docx_2pass(
     no_update_prompt: bool = False,
     out_dir: Optional[str] = None,
     spec_dir: Optional[str] = None,
+    export_pdf_path: Optional[str] = None,
 ) -> bool:
     """
-    Two-pass compiler:
-    Pass 1: Build multi-section .docx with estimated page numbers (via python-docx or pure-stdlib OpenXML).
+    Two-pass compiler using pure-stdlib OpenXML:
+    Pass 1: Build multi-section .docx with estimated page numbers.
     Pass 2: Render PDF via LibreOffice, extract exact page numbers (via pypdf or pdftotext),
-            and rebuild .docx with exact TOC page numbers.
+            and rebuild .docx only when page numbers differ from Pass 1 estimates.
     """
-    has_python_docx = False
-    try:
-        import docx  # noqa: F401
-        has_python_docx = True
-    except ImportError:
-        print("[NOTICE] python-docx is not installed. Using native stdlib OpenXML .docx builder...")
-
     target_dir = out_dir or os.path.dirname(docx_path) or "."
     enable_update_prompt = not no_update_prompt
 
     def _compile_pass(p_map: Dict[str, str]) -> None:
-        if has_python_docx:
-            build_docx_internal(
-                spec,
-                docx_path,
-                page_map=p_map,
-                enable_update_prompt=enable_update_prompt,
-                spec_dir=spec_dir,
-                out_dir=target_dir,
-            )
-        else:
-            build_docx_stdlib_oxml(
-                spec,
-                docx_path,
-                page_map=p_map,
-                enable_update_prompt=enable_update_prompt,
-                spec_dir=spec_dir,
-                out_dir=target_dir,
-            )
+        build_docx_stdlib_oxml(
+            spec,
+            docx_path,
+            page_map=p_map,
+            enable_update_prompt=enable_update_prompt,
+            spec_dir=spec_dir,
+            out_dir=target_dir,
+        )
 
     temp_dir = tempfile.mkdtemp(prefix="umg_build_")
     try:
@@ -1908,6 +1450,8 @@ def build_docx_2pass(
         pdf_path = None
         if page_source == "none":
             print("[NOTICE] --page-source none: Using Word field PAGEREF with estimated preview numbers.")
+            if export_pdf_path:
+                export_docx_to_pdf_official(docx_path, os.path.dirname(os.path.abspath(export_pdf_path)))
             print("[OK] DOCX manual generated: " + docx_path)
             return True
         elif page_source.startswith("pdf:"):
@@ -1916,10 +1460,14 @@ def build_docx_2pass(
         elif page_source == "auto":
             pdf_path = render_docx_to_pdf_libreoffice(docx_path, temp_dir)
 
+        needs_rebuild = False
         if pdf_path and os.path.isfile(pdf_path):
             exact_map = extract_page_map_from_pdf(pdf_path, spec)
             if exact_map:
-                _compile_pass(exact_map)
+                merged_map = {**est_map, **exact_map}
+                needs_rebuild = any(merged_map.get(k) != est_map.get(k) for k in merged_map)
+                if needs_rebuild:
+                    _compile_pass(merged_map)
                 print(f"[OK] Resolved {len(exact_map)} exact page numbers via rendered PDF.")
             else:
                 print("[NOTICE] PDF parsed but no bookmarks mapped. Keeping estimated layout.")
@@ -1927,6 +1475,14 @@ def build_docx_2pass(
             print(
                 "[NOTICE] LibreOffice not available for auto PDF render. DOCX contains dynamic PAGEREF fields that update automatically when opened in Word."
             )
+
+        if export_pdf_path:
+            if page_source == "auto" and pdf_path and os.path.isfile(pdf_path) and not needs_rebuild:
+                os.makedirs(os.path.dirname(os.path.abspath(export_pdf_path)), exist_ok=True)
+                shutil.copy2(pdf_path, export_pdf_path)
+                print(f"[OK] Official PDF manual exported: {export_pdf_path}")
+            else:
+                export_docx_to_pdf_official(docx_path, os.path.dirname(os.path.abspath(export_pdf_path)))
 
         print(f"[OK] DOCX manual generated: {docx_path}")
         return True
@@ -2148,6 +1704,7 @@ def main() -> None:
             build_markdown(spec_data, md_out, out_dir, spec_dir=spec_dir)
 
         docx_built = False
+        pdf_created = None
         if should_build_docx:
             docx_built = build_docx_2pass(
                 spec_data,
@@ -2156,11 +1713,10 @@ def main() -> None:
                 no_update_prompt=args.no_word_update_prompt,
                 out_dir=out_dir,
                 spec_dir=spec_dir,
+                export_pdf_path=pdf_out if should_export_pdf else None,
             )
-
-        pdf_created = None
-        if should_export_pdf and docx_built:
-            pdf_created = export_docx_to_pdf_official(docx_out, out_dir)
+            if should_export_pdf and docx_built and os.path.isfile(pdf_out):
+                pdf_created = pdf_out
 
         ok = verify_outputs(
             md_path=md_out if should_build_md else None,

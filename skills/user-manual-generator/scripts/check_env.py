@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Environment and dependency verifier for user-manual-generator.
-Inspects Python version, required modules (PIL, python-docx, playwright, pypdf),
+Inspects Python version, optional modules (PIL, pycairo, playwright, pypdf),
 Playwright Chromium browser binary, and LibreOffice / PDF rendering tools.
 Works in both sandboxed and host environments.
 """
@@ -18,7 +18,6 @@ from typing import Any, Dict
 REQUIRED_MODULES = {
     "PIL": "Pillow",
     "cairo": "pycairo",
-    "docx": "python-docx",
     "playwright": "playwright",
     "pypdf": "pypdf",
 }
@@ -57,23 +56,52 @@ def check_modules() -> Dict[str, Any]:
     return {"modules": results, "missing_packages": missing}
 
 
+def _find_cached_or_system_chromium() -> str:
+    cache_roots = [
+        os.path.join(os.getcwd(), ".venv-manual", "ms-playwright"),
+        os.path.expanduser("~/.cache/ms-playwright"),
+    ]
+    for root in cache_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for cand_name in ("chrome", "chrome-headless-shell", "chromium"):
+                if cand_name in filenames:
+                    cand = os.path.join(dirpath, cand_name)
+                    if os.access(cand, os.X_OK):
+                        return cand
+    for bin_name in ("chromium", "chromium-browser", "google-chrome", "microsoft-edge"):
+        found = shutil.which(bin_name)
+        if found:
+            return found
+    return ""
+
+
 def check_playwright_chromium() -> Dict[str, Any]:
     spec = importlib.util.find_spec("playwright")
+    cached_or_sys = _find_cached_or_system_chromium()
     if not spec:
-        return {"installed": False, "detail": "playwright module missing"}
+        return {
+            "installed": False,
+            "system_browser": cached_or_sys or None,
+            "detail": f"playwright module missing (system browser: {cached_or_sys})"
+            if cached_or_sys
+            else "playwright module missing",
+        }
     try:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
             exec_path = p.chromium.executable_path
-            exists = os.path.exists(exec_path) if exec_path else False
+            exists = bool(exec_path and os.path.exists(exec_path))
+            resolved = exec_path if exists else cached_or_sys
             return {
-                "installed": exists,
-                "executable_path": exec_path,
-                "detail": "OK" if exists else "Chromium executable not found",
+                "installed": bool(resolved),
+                "executable_path": resolved or exec_path,
+                "detail": "OK" if resolved else "Chromium executable not found",
             }
     except Exception as err:
-        return {"installed": False, "detail": str(err)}
+        return {"installed": False, "system_browser": cached_or_sys or None, "detail": str(err)}
 
 
 def check_soffice() -> Dict[str, Any]:
@@ -83,7 +111,16 @@ def check_soffice() -> Dict[str, Any]:
         "path": path,
         "detail": "LibreOffice available for automatic PDF rendering"
         if path
-        else "LibreOffice not in PATH (manual PDF export or Word-fields mode available)",
+        else "LibreOffice not in PATH (Word-fields mode available)",
+    }
+
+
+def check_pdftotext() -> Dict[str, Any]:
+    path = shutil.which("pdftotext")
+    return {
+        "available": bool(path),
+        "path": path,
+        "detail": "pdftotext available for 2-pass PDF TOC extraction" if path else "pdftotext not in PATH",
     }
 
 
@@ -113,37 +150,46 @@ def inspect_environment(profile: str = "all") -> Dict[str, Any]:
     mod_info = check_modules()
     pw_info = check_playwright_chromium()
     so_info = check_soffice()
+    pdf_txt_info = check_pdftotext()
     venv_info = check_venv()
     pip_info = check_pip()
 
-    has_docx = mod_info["modules"]["docx"]["installed"] or so_info["available"]
-    docx_engine = (
-        "python-docx"
-        if mod_info["modules"]["docx"]["installed"]
-        else ("libreoffice" if so_info["available"] else "none")
+    has_docx = py_info["valid"]
+    docx_engine = "stdlib-oxml + libreoffice" if so_info["available"] else "stdlib-oxml"
+    has_pdf_toc = so_info["available"] and (
+        mod_info["modules"]["pypdf"]["installed"] or pdf_txt_info["available"]
+    )
+    pdf_toc_engine = (
+        f"soffice + {'pypdf' if mod_info['modules']['pypdf']['installed'] else 'pdftotext'}"
+        if has_pdf_toc
+        else ("soffice only" if so_info["available"] else "none")
     )
 
     has_annotation = (
         mod_info["modules"]["PIL"]["installed"]
         or mod_info["modules"]["cairo"]["installed"]
     )
-    annotation_engine = (
-        "Pillow"
-        if mod_info["modules"]["PIL"]["installed"]
-        else ("PyCairo" if mod_info["modules"]["cairo"]["installed"] else "none")
-    )
+    if mod_info["modules"]["cairo"]["installed"] and mod_info["modules"]["PIL"]["installed"]:
+        annotation_engine = "PyCairo + Pillow"
+    elif mod_info["modules"]["cairo"]["installed"]:
+        annotation_engine = "PyCairo"
+    elif mod_info["modules"]["PIL"]["installed"]:
+        annotation_engine = "Pillow"
+    else:
+        annotation_engine = "none"
 
     capabilities = {
         "markdown": py_info["valid"],
         "state_gap_analysis": py_info["valid"],
         "docx": has_docx,
         "docx_engine": docx_engine,
+        "pdf_2pass_toc": has_pdf_toc,
+        "pdf_2pass_engine": pdf_toc_engine,
         "browser_capture": pw_info["installed"],
         "annotation": has_annotation,
         "annotation_engine": annotation_engine,
     }
 
-    # Annotation is satisfied if either Pillow or PyCairo is present
     missing_critical = [
         pkg
         for pkg in mod_info["missing_packages"]
@@ -177,6 +223,7 @@ def inspect_environment(profile: str = "all") -> Dict[str, Any]:
         "dependencies": mod_info,
         "playwright_chromium": pw_info,
         "libreoffice": so_info,
+        "pdftotext": pdf_txt_info,
         "virtualenv": venv_info,
         "pip": pip_info,
     }
@@ -190,22 +237,29 @@ def format_text_report(info: Dict[str, Any], profile: str = "all") -> str:
 
     lines.append("\nCapability Matrix:")
     caps = info["capabilities"]
-    lines.append(f"  ✓ Markdown Manual (.md): READY (100% Python Standard Library)")
-    lines.append(f"  ✓ State & Gap Analysis: READY (100% Python Standard Library)")
+    lines.append("  ✓ Markdown Manual (.md): READY (100% Python Standard Library)")
+    lines.append("  ✓ State & Gap Analysis: READY (100% Python Standard Library)")
     if caps["docx"]:
         lines.append(f"  ✓ Word Export (.docx): READY (Engine: {caps['docx_engine']})")
     else:
-        lines.append(f"  ✗ Word Export (.docx): NOT READY (python-docx and LibreOffice missing)")
+        lines.append("  ✗ Word Export (.docx): NOT READY (Python 3.9+ required)")
+
+    if caps["pdf_2pass_toc"]:
+        lines.append(f"  ✓ PDF Export & 2-Pass TOC: READY (Engine: {caps['pdf_2pass_engine']})")
+    elif info["libreoffice"]["available"]:
+        lines.append("  ⚠ PDF Export & 2-Pass TOC: PARTIAL (LibreOffice available; pypdf/pdftotext missing for exact TOC pages)")
+    else:
+        lines.append("  ⚠ PDF Export & 2-Pass TOC: OPTIONAL (LibreOffice not found; dynamic PAGEREF fields active)")
 
     if caps["browser_capture"]:
-        lines.append(f"  ✓ Browser Auto-Capture: READY (Playwright Chromium)")
+        lines.append("  ✓ Browser Auto-Capture: READY (Playwright Chromium)")
     else:
-        lines.append(f"  ⚠ Browser Auto-Capture: OPTIONAL (Playwright missing; use Browser MCP/DevTools or manual raw screenshots)")
+        lines.append("  ⚠ Browser Auto-Capture: OPTIONAL (Playwright missing; use Browser MCP/DevTools or manual raw screenshots)")
 
     if caps["annotation"]:
         lines.append(f"  ✓ Visual Arrow Annotation: READY (Engine: {caps['annotation_engine']})")
     else:
-        lines.append(f"  ⚠ Visual Arrow Annotation: OPTIONAL (Pillow and PyCairo missing; place pre-annotated screenshots in final/)")
+        lines.append("  ⚠ Visual Arrow Annotation: OPTIONAL (Pillow and PyCairo missing; place pre-annotated screenshots in final/)")
 
     lines.append("\nTooling & Runtime Details:")
     for mod, data in info["dependencies"]["modules"].items():
@@ -216,7 +270,10 @@ def format_text_report(info: Dict[str, Any], profile: str = "all") -> str:
     lines.append(f"  - Playwright Chromium: {'OK' if pw['installed'] else 'MISSING'}")
 
     so = info["libreoffice"]
-    lines.append(f"  - LibreOffice (/usr/bin/soffice): {'AVAILABLE' if so['available'] else 'NOT FOUND'}")
+    lines.append(f"  - LibreOffice (soffice): {'AVAILABLE' if so['available'] else 'NOT FOUND'}")
+
+    pt = info["pdftotext"]
+    lines.append(f"  - pdftotext (poppler): {'AVAILABLE' if pt['available'] else 'NOT FOUND'}")
 
     pip_data = info["pip"]
     lines.append(f"  - Pip Package Manager: {'AVAILABLE' if pip_data['available'] else 'NOT INSTALLED'}")
@@ -225,21 +282,20 @@ def format_text_report(info: Dict[str, Any], profile: str = "all") -> str:
     if info["ready"]:
         lines.append(f"  [STATUS: READY] Profile '{profile}' is fully satisfied.")
     elif info["ready_core"]:
-        lines.append(f"  [STATUS: VIABLE FOR CORE WORKFLOW]")
-        lines.append("  Core capabilities (Markdown, Gap Analysis, and DOCX via fallback) are READY to use.")
+        lines.append("  [STATUS: VIABLE FOR CORE WORKFLOW]")
+        lines.append("  Core capabilities (Markdown, Gap Analysis, and stdlib OpenXML DOCX) are READY to use.")
         lines.append("  No internet connection or external pip package is required for core manual generation.")
     else:
-        lines.append("  [STATUS: SETUP NEEDED] Python 3.9+ or document conversion engine missing.")
+        lines.append("  [STATUS: SETUP NEEDED] Python 3.9+ required.")
 
     if not info["ready_full"]:
         lines.append("\nOffline & Fallback Workflow Notes:")
-        lines.append("1. Markdown Manuals: Run 'python3 scripts/build_manual.py --format md ...' (no pip needed).")
-        lines.append("2. Word Documents: Fallback to LibreOffice is automatic if python-docx is not installed.")
-        lines.append("3. Screenshots: Place images directly in 'docs/manual_book/assets/raw/' or use Browser MCP tools.")
+        lines.append("1. Markdown & DOCX Manuals: Built-in 100% Python stdlib OpenXML builder requires zero pip packages.")
+        lines.append("2. Screenshots: Place images directly in 'docs/manual_book/assets/raw/' or use Browser MCP tools.")
         if pip_data["available"]:
-            lines.append("4. Full Suite Installation (if internet is available):")
+            lines.append("3. Full Suite Installation (if internet is available):")
             lines.append("   python3 -m venv .venv-manual")
-            lines.append("   .venv-manual/bin/pip install Pillow python-docx playwright pypdf")
+            lines.append("   .venv-manual/bin/pip install Pillow playwright pypdf")
             lines.append("   PLAYWRIGHT_BROWSERS_PATH=.venv-manual/ms-playwright .venv-manual/bin/python -m playwright install chromium")
 
     return "\n".join(lines)
@@ -256,7 +312,7 @@ def main() -> None:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Strict mode: require all optional packages (Pillow, python-docx, playwright) to pass.",
+        help="Strict mode: require all optional packages (Pillow/pycairo, playwright, pypdf) to pass.",
     )
     parser.add_argument("--json", action="store_true", help="Output report in JSON format.")
     parser.add_argument("--quiet", action="store_true", help="Suppress output, exit code indicates readiness.")

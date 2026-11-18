@@ -4,10 +4,10 @@ description: Generate end-user manual books (user guides / panduan pengguna) for
 license: MIT
 compatibility: Requires Python 3.9+ stdlib for .md and .docx generation; Pillow or PyCairo (cairo) for annotations; playwright or Browser MCP for live captures; LibreOffice + (pypdf or pdftotext) for automated 2-pass PDF page resolution and official PDF export.
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
-# App Manual Generator
+# User Manual Generator
 
 Create clear, high-resolution end-user manual books in Markdown (`.md`), Microsoft Word (`.docx`), and official PDF (`.pdf`) formats. This skill provides sandbox-first execution, task resume support, feature gap analysis, automated high-DPI screenshot capture, layout-aware collision-free arrow annotations (avoiding text occlusion via Pillow or PyCairo), working Table of Contents hyperlinks, self-contained embedded media, and page-numbered outputs.
 
@@ -39,7 +39,7 @@ python3 scripts/check_env.py
    If full Playwright auto-capture and Pillow image annotations are desired and an internet connection is available:
    ```bash
    python3 -m venv .venv-manual
-   .venv-manual/bin/pip install Pillow python-docx playwright pypdf
+   .venv-manual/bin/pip install Pillow playwright pypdf
    PLAYWRIGHT_BROWSERS_PATH=.venv-manual/ms-playwright .venv-manual/bin/python -m playwright install chromium
    ```
    If network access is restricted or `pip` is unavailable, continue directly using the built-in offline/fallback capabilities (LibreOffice + PyCairo) without blocking.
@@ -137,6 +137,12 @@ python3 scripts/capture_and_annotate.py capture \
 
 - Target selectors save exact UI bounding boxes directly in the layout sidecar.
 - Always mask passwords, API keys, and personal data using `--mask-selectors`.
+- **Batch Mode from `manual_spec.json`**: Reuse a single browser session and annotate all pending figures in one pass using `batch --spec` (or `capture --spec` / `annotate --auto --spec`):
+  ```bash
+  python3 scripts/capture_and_annotate.py batch \
+    --spec "docs/manual_book/manual_spec.json" \
+    --draw-target-boxes
+  ```
 
 #### Desktop Applications (Existing Raw Screenshots)
 For desktop software or pre-captured screenshots:
@@ -241,11 +247,12 @@ python3 scripts/annotate_cairo.py \
   --arrow "1177,240,1177,296,1"
 ```
 
-- **Mandatory Visual Inspection Before `--verified`**: Open and inspect **every** annotated image one by one (e.g. via `read_file` or an image viewer) to verify: (1) zero badges, arrowheads, or dashed lines cover headings/labels, (2) dashed boxes frame the target cleanly without slicing adjacent text, and (3) badge numbers flow logically top-to-bottom. Never batch-mark figures in a blind loop. `manual_state.py mark --verified` also checks `<image>.arrows.json` and rejects figures with `unresolved_collisions > 0`:
+- **Mandatory Visual Inspection Before `--verified`**: Open and inspect **every** annotated image one by one (e.g. via `read_file` or an image viewer) to verify: (1) zero badges, arrowheads, or dashed lines cover headings/labels, (2) dashed boxes frame the target cleanly without slicing adjacent text, and (3) badge numbers flow logically top-to-bottom. Never batch-mark figures without inspecting each output first. After inspecting multiple figures, you may record them together in one call (`--figure "1.1,1.2"` or `--all-figures`); `manual_state.py mark --verified` checks every `<image>.arrows.json` and rejects figures with `unresolved_collisions > 0`:
   ```bash
   python3 scripts/manual_state.py mark \
     --progress "docs/manual_book/manual_progress.json" \
-    --figure "1.1" --verified
+    --spec "docs/manual_book/manual_spec.json" \
+    --figure "1.1,1.2" --verified
   ```
 
 ---
@@ -276,8 +283,8 @@ python3 scripts/annotate_cairo.py \
   - Both the image and the figure caption (*Gambar X.Y: Judul* / *Figure X.Y: Title*) are center-aligned with `keepNext` chains linking section headings, images, captions, and bullets.
 - **Format Selection & Native OpenXML Builder**:
   - `--format md`: Generates Markdown only (zero external dependencies).
-  - `--format all` / `--format docx`: Uses `python-docx` if installed, or builds a native multi-section ECMA-376 OpenXML `.docx` (`build_docx_stdlib_oxml`) using 100% Python stdlib with embedded `word/media/` images.
-  - `--format pdf` / `--export-pdf`: Renders an official PDF via sandboxed headless LibreOffice (`-env:UserInstallation=file:///tmp/lo_prof_*`), using `pypdf` or `pdftotext` in Pass 2 to populate exact section page numbers in the TOC.
+  - `--format all` / `--format docx`: Always builds a native multi-section ECMA-376 OpenXML `.docx` (`build_docx_stdlib_oxml`) using 100% Python stdlib with embedded `word/media/` images, multi-paragraph `\n\n` breaks, and styled callout blockquotes (`> **Note:** ...`).
+  - `--format pdf` / `--export-pdf`: Renders an official PDF via sandboxed headless LibreOffice (`-env:UserInstallation=file:///tmp/lo_prof_*`), using `pypdf` named destinations or `pdftotext` in Pass 2 to populate exact section page numbers in the TOC (reusing the Pass 2 PDF without re-running LibreOffice when TOC page numbers are unchanged).
 - **3-Section Pagination Hierarchy**:
   - **Cover Page (Section 1)**: Centered logo or `[ APPLICATION LOGO ]` / `[ LOGO APLIKASI ]` box, wrapped 26pt bold title, subtitle, metadata rule, and **no page number**.
   - **Table of Contents (Section 2)**: Lowercase Roman numerals (`i`, `ii`...), clickable internal hyperlinks, right-aligned dot leaders at `9026 dxa` (6.27"), `360 dxa` subsection indentation, and `PAGEREF` fields.

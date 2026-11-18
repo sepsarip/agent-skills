@@ -104,7 +104,7 @@ def detect_cairo_surface_obstacles(
     return dense_rects
 
 
-def _circle_intersects_rect(
+def circle_intersects_rect(
     cx: float, cy: float, radius: float,
     rx1: float, ry1: float, rx2: float, ry2: float,
 ) -> bool:
@@ -117,7 +117,7 @@ def _circle_intersects_rect(
     return (dx * dx + dy * dy) <= (radius * radius)
 
 
-def _rect_intersects_segment(
+def rect_intersects_segment(
     rx1: float, ry1: float, rx2: float, ry2: float,
     x1: float, y1: float, x2: float, y2: float, pad: float = 4.0,
 ) -> bool:
@@ -149,6 +149,10 @@ def _rect_intersects_segment(
         if 0.0 <= ua <= 1.0 and 0.0 <= ub <= 1.0:
             return True
     return False
+
+
+_circle_intersects_rect = circle_intersects_rect
+_rect_intersects_segment = rect_intersects_segment
 
 
 def _obs_near_point(obs: Dict[str, float], px: float, py: float, tol: float = 14.0) -> bool:
@@ -183,39 +187,44 @@ def draw_badge_and_arrow(
     start_x = badge_x + ux * badge_radius
     start_y = badge_y + uy * badge_radius
 
+    arrow_len = 13.0
+    arrow_half_w = 5.5
+    base_x = target_x - ux * arrow_len
+    base_y = target_y - uy * arrow_len
+    shaft_end_x = target_x - ux * (arrow_len * 0.75)
+    shaft_end_y = target_y - uy * (arrow_len * 0.75)
+
     # 1. Draw Arrow Line Shadow
     ctx.save()
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     ctx.set_line_width(5.0)
     ctx.set_source_rgba(0.0, 0.0, 0.0, 0.25)
     ctx.move_to(start_x + 1.5, start_y + 1.5)
-    ctx.line_to(target_x + 1.5, target_y + 1.5)
+    ctx.line_to(shaft_end_x + 1.5, shaft_end_y + 1.5)
     ctx.stroke()
     ctx.restore()
 
     # 2. Draw Arrow Line White Glow / Outline
     ctx.save()
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     ctx.set_line_width(4.5)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.move_to(start_x, start_y)
-    ctx.line_to(target_x, target_y)
+    ctx.line_to(shaft_end_x, shaft_end_y)
     ctx.stroke()
     ctx.restore()
 
     # 3. Draw Arrow Line Main Color
     ctx.save()
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     ctx.set_line_width(2.5)
     ctx.set_source_rgb(*color)
     ctx.move_to(start_x, start_y)
-    ctx.line_to(target_x, target_y)
+    ctx.line_to(shaft_end_x, shaft_end_y)
     ctx.stroke()
     ctx.restore()
 
     # 4. Draw Arrow Head (Triangle)
-    arrow_len = 13.0
-    arrow_half_w = 5.5
-
-    base_x = target_x - ux * arrow_len
-    base_y = target_y - uy * arrow_len
     norm_x = -uy
     norm_y = ux
 
@@ -225,6 +234,7 @@ def draw_badge_and_arrow(
     right_y = base_y - norm_y * arrow_half_w
 
     ctx.save()
+    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
     ctx.set_line_width(1.5)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.move_to(target_x, target_y)

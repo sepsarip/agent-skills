@@ -172,6 +172,10 @@ def cmd_status(args: argparse.Namespace) -> None:
             "command": f"python3 scripts/capture_and_annotate.py capture {url_arg} --output {shlex.quote(item['raw'])}",
             "reason": f"Raw screenshot for Figure {item['id']} is missing.",
         }
+        if len(missing_raw) > 1:
+            next_action["batch_command"] = (
+                f"python3 scripts/capture_and_annotate.py capture --spec {shlex.quote(spec_path)}"
+            )
     elif missing_annotated:
         item = missing_annotated[0]
         targets = item.get("source", {}).get("targets", [])
@@ -185,11 +189,20 @@ def cmd_status(args: argparse.Namespace) -> None:
             "command": cmd,
             "reason": f"Annotated final image for Figure {item['id']} is missing.",
         }
+        if len(missing_annotated) > 1:
+            next_action["batch_command"] = (
+                f"python3 scripts/capture_and_annotate.py annotate --auto --spec {shlex.quote(spec_path)}"
+            )
     elif unverified_figures:
         item = unverified_figures[0]
+        fig_arg = (
+            ",".join(str(x["id"]) for x in unverified_figures)
+            if len(unverified_figures) > 1
+            else str(item["id"])
+        )
         next_action = {
             "step": "Visual Verification",
-            "command": f"python3 scripts/manual_state.py mark --progress {shlex.quote(progress_path)} --figure {shlex.quote(item['id'])} --verified",
+            "command": f"python3 scripts/manual_state.py mark --progress {shlex.quote(progress_path)} --spec {shlex.quote(spec_path)} --figure {shlex.quote(fig_arg)} --verified",
             "reason": f"Figure {item['id']} ({item['final']}) needs visual verification to ensure arrows do not occlude text.",
         }
     elif outputs_missing or is_stale:
@@ -244,6 +257,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"NEXT ACTION: [{next_action['step']}]")
         print(f"Reason: {next_action['reason']}")
         print(f"Run:\n  {next_action['command']}")
+        if next_action.get("batch_command"):
+            print(f"Batch Alternative:\n  {next_action['batch_command']}")
     else:
         print("STATUS: ALL DONE! All steps and artifacts are verified and up to date.")
     print("---------------------------------------------------------")
@@ -252,6 +267,31 @@ def cmd_status(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------
 # Subcommand: mark (Update Progress Markers)
 # ---------------------------------------------------------
+def _resolve_spec_for_mark(args: argparse.Namespace, progress_dir: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    spec_cand = (
+        validate_workspace_path(args.spec, must_exist=True)
+        if getattr(args, "spec", "")
+        else os.path.join(progress_dir, "manual_spec.json")
+    )
+    if os.path.isfile(spec_cand):
+        try:
+            return load_json(spec_cand), os.path.dirname(spec_cand)
+        except Exception:
+            return {}, os.path.dirname(spec_cand)
+    return None, progress_dir
+
+
+def _collect_fig_image_map(spec_obj: Dict[str, Any]) -> Dict[str, str]:
+    fig_map: Dict[str, str] = {}
+    for ch in spec_obj.get("chapters", []):
+        for sec in ch.get("sections", []):
+            for fig in sec.get("figures", []):
+                fid = str(fig.get("id", "")).strip()
+                if fid:
+                    fig_map[fid] = str(fig.get("image_path", ""))
+    return fig_map
+
+
 def cmd_mark(args: argparse.Namespace) -> None:
     progress_path = validate_workspace_path(args.progress, must_exist=False)
     progress_dir = os.path.dirname(progress_path)
@@ -274,48 +314,46 @@ def cmd_mark(args: argparse.Namespace) -> None:
             data["log"].append({"at": now_iso, "event": "outline-approved"})
             print(f"[OK] Marked outline as approved in {progress_path}")
 
-    if args.figure:
-        fig_id = str(args.figure)
-        if args.verified and not getattr(args, "force", False):
-            spec_cand = (
-                validate_workspace_path(args.spec, must_exist=True)
-                if getattr(args, "spec", "")
-                else os.path.join(progress_dir, "manual_spec.json")
-            )
-            if os.path.isfile(spec_cand):
-                try:
-                    spec_obj = load_json(spec_cand)
-                except Exception:
-                    spec_obj = {}
-                spec_dir = os.path.dirname(spec_cand)
-                matched_img_path = ""
-                for ch in spec_obj.get("chapters", []):
-                    for sec in ch.get("sections", []):
-                        for fig in sec.get("figures", []):
-                            if str(fig.get("id", "")) == fig_id:
-                                matched_img_path = fig.get("image_path", "")
-                                break
-                if matched_img_path:
-                    resolved_final = resolve_spec_asset_path(
-                        matched_img_path, spec_dir=spec_dir, out_dir=spec_dir
-                    )
-                    if not os.path.isfile(resolved_final):
-                        raise FileNotFoundError(
-                            f"Cannot mark figure {fig_id} as verified: annotated image not found at '{resolved_final}'."
-                        )
-                    arrows_audit = f"{os.path.splitext(resolved_final)[0]}.arrows.json"
-                    if os.path.isfile(arrows_audit):
-                        try:
-                            audit_data = load_json(arrows_audit)
-                        except Exception:
-                            audit_data = {}
-                        unresolved = int(audit_data.get("unresolved_collisions", 0) or 0)
-                        if unresolved > 0:
-                            raise ValueError(
-                                f"Cannot mark figure {fig_id} as verified: {unresolved} unresolved text/UI collision(s) "
-                                f"recorded in '{arrows_audit}'. Re-annotate cleanly or pass --force after visual inspection."
-                            )
+    spec_obj, spec_dir = _resolve_spec_for_mark(args, progress_dir)
+    fig_image_map = _collect_fig_image_map(spec_obj) if spec_obj else {}
 
+    target_figures: List[str] = []
+    if getattr(args, "all_figures", False):
+        if not fig_image_map:
+            raise ValueError("Cannot use --all-figures: manual_spec.json not found or has no figures.")
+        target_figures.extend(fig_image_map.keys())
+    elif args.figure:
+        for part in str(args.figure).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in target_figures:
+                target_figures.append(cleaned)
+
+    if target_figures and args.verified and not getattr(args, "force", False) and spec_obj is not None:
+        for fig_id in target_figures:
+            matched_img_path = fig_image_map.get(fig_id, "")
+            if not matched_img_path:
+                continue
+            resolved_final = resolve_spec_asset_path(
+                matched_img_path, spec_dir=spec_dir, out_dir=spec_dir
+            )
+            if not os.path.isfile(resolved_final):
+                raise FileNotFoundError(
+                    f"Cannot mark figure {fig_id} as verified: annotated image not found at '{resolved_final}'."
+                )
+            arrows_audit = f"{os.path.splitext(resolved_final)[0]}.arrows.json"
+            if os.path.isfile(arrows_audit):
+                try:
+                    audit_data = load_json(arrows_audit)
+                except Exception:
+                    audit_data = {}
+                unresolved = int(audit_data.get("unresolved_collisions", 0) or 0)
+                if unresolved > 0:
+                    raise ValueError(
+                        f"Cannot mark figure {fig_id} as verified: {unresolved} unresolved text/UI collision(s) "
+                        f"recorded in '{arrows_audit}'. Re-annotate cleanly or pass --force after visual inspection."
+                    )
+
+    for fig_id in target_figures:
         fig_entry = data["figures"].setdefault(fig_id, {})
         if args.verified:
             fig_entry["verified"] = True
@@ -794,26 +832,6 @@ def cmd_renumber(args: argparse.Namespace) -> None:
 def cmd_outline_docx(args: argparse.Namespace) -> None:
     docx_path = validate_workspace_path(args.input, must_exist=True)
     print(f"=== Document Outline: {docx_path} ===")
-    try:
-        from docx import Document
-        doc = Document(docx_path)
-        for p in doc.paragraphs:
-            style_name = p.style.name if p.style else ""
-            text = p.text.strip()
-            if not text:
-                continue
-            if "Heading 1" in style_name:
-                print(f"# {text}")
-            elif "Heading 2" in style_name:
-                print(f"  ## {text}")
-            elif "Heading 3" in style_name:
-                print(f"    ### {text}")
-            elif text.lower().startswith("figure") or text.lower().startswith("gambar"):
-                print(f"      [Image Caption] {text}")
-        return
-    except ImportError:
-        pass
-
     import xml.etree.ElementTree as ET
     import zipfile
 
@@ -876,8 +894,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mark.add_argument("--spec", default="", help="Optional path to manual_spec.json for collision audit checks.")
     p_mark.add_argument("--phase", choices=["outline-approved"], help="Record milestone phase.")
-    p_mark.add_argument("--figure", help="Figure ID to mark (e.g. '1.1').")
-    p_mark.add_argument("--verified", action="store_true", help="Mark figure as visually verified.")
+    p_mark.add_argument("--figure", help="Figure ID(s) to mark (e.g. '1.1' or '1.1,1.2').")
+    p_mark.add_argument("--all-figures", action="store_true", help="Mark all figures in manual_spec.json.")
+    p_mark.add_argument("--verified", action="store_true", help="Mark figure(s) as visually verified.")
     p_mark.add_argument("--force", action="store_true", help="Bypass collision audit gate when marking verified.")
     p_mark.add_argument("--comment", help="Optional comment or inspection note.")
     p_mark.set_defaults(func=cmd_mark)

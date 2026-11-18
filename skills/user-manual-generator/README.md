@@ -12,9 +12,9 @@ The **`user-manual-generator`** skill gives AI coding agents a structured, deter
 - **Sandbox-First Execution**: Works inside standard agent sandboxes with isolated virtual environment support.
 - **Task Continuation & Resume**: Tracks milestones in `manual_progress.json` and tells the agent the exact next command to run if interrupted.
 - **Feature Gap Analysis**: Compares codebase routes, pages, and menus against the manual to pinpoint missing, documented, or stale features.
-- **High-DPI Capture & Layout Mapping**: Automatically captures Retina-grade (`deviceScaleFactor=2`) screenshots and extracts element coordinates into layout sidecars.
-- **Dual-Engine Collision-Free Arrow Annotations**: Intelligently routes arrows to element boundaries while placing tail badges in clear whitespace without occluding on-screen text (supports both Pillow and PyCairo).
-- **Standards-Compliant Word & PDF Output**: Adheres strictly to ECMA-376 OpenXML schema rules, producing clickable Table of Contents hyperlinks, dot leader tabs aligned to printable margins, self-contained embedded media (`word/media/`), Roman front-matter numerals, clean blank headers, standard 1.0-inch margins, dynamic `PAGEREF` page numbers, and official `.pdf` export.
+- **High-DPI Capture & Layout Mapping**: Automatically captures Retina-grade (`deviceScaleFactor=2`) screenshots (single URL or batch `--spec`) and extracts element coordinates into layout sidecars.
+- **Dual-Engine Collision-Free Arrow Annotations**: Intelligently routes arrows to element boundaries while placing tail badges in clear whitespace without occluding on-screen text (prefers PyCairo vector rendering for PNGs, with Pillow fallback).
+- **Standards-Compliant Word & PDF Output**: Uses a 100% Python stdlib ECMA-376 OpenXML builder (`stdlib-oxml`) producing clickable Table of Contents hyperlinks, dot leader tabs aligned to printable margins, self-contained embedded media (`word/media/`), Roman front-matter numerals, clean blank headers, standard 1.0-inch margins, styled callout blockquotes, dynamic `PAGEREF` page numbers, and official `.pdf` export.
 
 ---
 
@@ -65,7 +65,7 @@ flowchart TD
   - Screenshots can be placed directly in `docs/manual_book/assets/raw/` or captured via Browser MCP tools.
   - All manual assets, specifications, states, and documents reside cleanly in `docs/manual_book/`.
 - **Full Suite Setup (When pip & internet are available)**:
-  - Python packages: `Pillow`, `python-docx`, `playwright`, `pypdf`
+  - Python packages: `Pillow`, `playwright`, `pypdf` (`.docx` is built natively via 100% Python stdlib OpenXML)
   - Headless browser: Playwright Chromium
 
 ```bash
@@ -74,8 +74,11 @@ python3 scripts/check_env.py
 
 # Recommended workspace virtual environment setup (when internet is available)
 python3 -m venv .venv-manual
-.venv-manual/bin/pip install Pillow python-docx playwright pypdf
+.venv-manual/bin/pip install Pillow playwright pypdf
 PLAYWRIGHT_BROWSERS_PATH=.venv-manual/ms-playwright .venv-manual/bin/python -m playwright install chromium
+
+# Batch capture and annotate all figures in manual_spec.json in one pass
+python3 scripts/capture_and_annotate.py batch --spec docs/manual_book/manual_spec.json --draw-target-boxes
 ```
 
 ---
