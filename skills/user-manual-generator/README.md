@@ -60,6 +60,7 @@ flowchart TD
 
 - **Core Capabilities (Offline / Zero-Dependency)**:
   - **Python 3.9+** (Standard Library) runs Markdown (`.md`) and ECMA-376 OpenXML Word (`.docx`) manual generation (with 3-section A4 pagination, Roman front matter, dot-leader TOC, and embedded media) plus Feature Gap Analysis with zero external pip packages.
+  - Default DOCX typography uses `Arial` / `Courier New` (`fonts-liberation` recommended on Linux for metric-accurate LibreOffice PDF pagination).
   - Official PDF (`.pdf`) export and 2-pass exact page numbering work with headless LibreOffice (`soffice`) and either `pypdf` or `pdftotext` (`poppler-utils`).
   - Image annotations work with either `Pillow` (`PIL`) OR `PyCairo` (`cairo`).
   - Screenshots can be placed directly in `docs/manual_book/assets/raw/` or captured via Browser MCP tools.

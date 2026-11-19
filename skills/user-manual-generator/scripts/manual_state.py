@@ -554,7 +554,7 @@ def cmd_import_md(args: argparse.Namespace) -> None:
     re_h3 = re.compile(r"^###\s+(\d+\.\d+)?\s*(.+)$")
     re_img = re.compile(r"^!\[(.*?)\]\((.*?)\)$")
     re_html_img = re.compile(r'<img\s+[^>]*src="([^"]+)"[^>]*alt="([^"]*)"', re.IGNORECASE)
-    re_html_cap = re.compile(r"<p>\s*<em>\s*<b>(.*?)</b>\s*</em>\s*</p>", re.IGNORECASE)
+    re_html_cap = re.compile(r"<p>(\s*(?:<em>\s*)?<b>.*?)</p>", re.IGNORECASE)
     re_anchor = re.compile(r'^<a\s+id="[^"]+"\s*>\s*</a>$', re.IGNORECASE)
     re_footer = re.compile(
         r"^\*?(?:(?:Page|Halaman)\s+\d+(?:\s+(?:of|dari)\s+\d+)?|\d+|[ivxlcdm]+)\*?$",
@@ -591,7 +591,7 @@ def cmd_import_md(args: argparse.Namespace) -> None:
                 pending_html_img = m_inline_img.group(1).strip()
                 pending_html_alt = m_inline_img.group(2).strip()
             if m_inline_cap and current_sec is not None:
-                caption = m_inline_cap.group(1).strip()
+                caption = re.sub(r"<[^>]+>", "", m_inline_cap.group(1)).strip()
                 fig_id = f"{current_sec['number']}.{len(current_sec['figures']) + 1}"
                 fig_title = caption
                 m_cap = re.match(r"^(?:Figure|Gambar)\s*(\d+\.\d+)[:.]?\s*(.*)$", caption, re.IGNORECASE)
@@ -620,7 +620,7 @@ def cmd_import_md(args: argparse.Namespace) -> None:
                 pending_html_alt = m_hi.group(2).strip()
             m_hc = re_html_cap.search(stripped)
             if m_hc and current_sec is not None:
-                caption = m_hc.group(1).strip()
+                caption = re.sub(r"<[^>]+>", "", m_hc.group(1)).strip()
                 fig_id = f"{current_sec['number']}.{len(current_sec['figures']) + 1}"
                 fig_title = caption
                 m_cap = re.match(r"^(?:Figure|Gambar)\s*(\d+\.\d+)[:.]?\s*(.*)$", caption, re.IGNORECASE)

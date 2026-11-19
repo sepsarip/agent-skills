@@ -178,7 +178,7 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         # Check for centered image and caption div
         self.assertIn('<div align="center">', md_content)
         self.assertIn("<img src=", md_content)
-        self.assertIn("<em><b>Figure 1.1: Sample Screenshot</b></em>", md_content)
+        self.assertIn("<p><b>Figure 1.1:</b> Sample Screenshot</p>", md_content)
 
     # -------------------------------------------------------------
     # 3. Stdlib OpenXML DOCX & Markdown-Only Modes
@@ -1621,6 +1621,326 @@ class TestUserManualGeneratorFixes(unittest.TestCase):
         self.assertEqual(audit["unresolved_collisions"], 0)
         arr = audit["arrows"][0]
         self.assertGreater(math.hypot(arr["x1"] - arr["x2"], arr["y1"] - arr["y2"]), 90.0)
+
+    # -------------------------------------------------------------
+    # 10. Typography, Font Portability, Alignment & Portrait Sizing
+    # -------------------------------------------------------------
+    def test_docx_fonts_default_and_custom(self):
+        """Verify DOCX defaults to Arial/Courier New with zero DejaVu, and supports custom fonts."""
+        import zipfile
+        from build_manual import build_docx_stdlib_oxml
+
+        spec_default = json.loads(json.dumps(self.sample_spec))
+        spec_default["chapters"][0]["sections"][0]["body"] = (
+            "Run `manual-cli` and click **Save** (See Figure 1.1)."
+        )
+        docx_default = os.path.join(self.tmp_dir, "fonts_default.docx")
+        build_docx_stdlib_oxml(spec_default, docx_default)
+
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        with zipfile.ZipFile(docx_default, "r") as zf:
+            for name in zf.namelist():
+                if name.startswith("word/") and name.endswith(".xml"):
+                    raw_xml = zf.read(name).decode("utf-8")
+                    self.assertNotIn("DejaVu", raw_xml, f"Residual DejaVu found in {name}")
+
+            styles_root = ET.fromstring(zf.read("word/styles.xml"))
+            num_root = ET.fromstring(zf.read("word/numbering.xml"))
+            ftr1_root = ET.fromstring(zf.read("word/footer1.xml"))
+            doc_root = ET.fromstring(zf.read("word/document.xml"))
+
+        default_rfonts = styles_root.find(f".//{w_ns}docDefaults//{w_ns}rFonts")
+        self.assertIsNotNone(default_rfonts)
+        self.assertEqual(default_rfonts.attrib.get(f"{w_ns}ascii"), "Arial")
+        self.assertEqual(default_rfonts.attrib.get(f"{w_ns}hAnsi"), "Arial")
+        self.assertEqual(default_rfonts.attrib.get(f"{w_ns}cs"), "Arial")
+
+        num_rfonts = num_root.find(f".//{w_ns}rFonts")
+        self.assertIsNotNone(num_rfonts)
+        self.assertEqual(num_rfonts.attrib.get(f"{w_ns}ascii"), "Arial")
+
+        ftr_rfonts = ftr1_root.find(f".//{w_ns}rFonts")
+        self.assertIsNotNone(ftr_rfonts)
+        self.assertEqual(ftr_rfonts.attrib.get(f"{w_ns}ascii"), "Arial")
+
+        run_fonts = {}
+        for r in doc_root.iter(f"{w_ns}r"):
+            rf = r.find(f"{w_ns}rPr/{w_ns}rFonts")
+            t = r.find(f"{w_ns}t")
+            if rf is not None and t is not None and t.text:
+                run_fonts[t.text] = rf.attrib.get(f"{w_ns}ascii")
+        self.assertEqual(run_fonts.get("manual-cli"), "Courier New")
+        self.assertEqual(run_fonts.get("Test Manual"), "Arial")
+
+        # Custom font family (including XML-escapable ampersand)
+        spec_custom = json.loads(json.dumps(spec_default))
+        spec_custom["font_family"] = "Georgia & Co"
+        spec_custom["code_font_family"] = "Consolas"
+        docx_custom = os.path.join(self.tmp_dir, "fonts_custom.docx")
+        build_docx_stdlib_oxml(spec_custom, docx_custom)
+
+        with zipfile.ZipFile(docx_custom, "r") as zf:
+            styles_custom = ET.fromstring(zf.read("word/styles.xml"))
+            num_custom = ET.fromstring(zf.read("word/numbering.xml"))
+            doc_custom = ET.fromstring(zf.read("word/document.xml"))
+
+        self.assertEqual(
+            styles_custom.find(f".//{w_ns}docDefaults//{w_ns}rFonts").attrib.get(f"{w_ns}ascii"),
+            "Georgia & Co",
+        )
+        self.assertEqual(
+            num_custom.find(f".//{w_ns}rFonts").attrib.get(f"{w_ns}ascii"),
+            "Georgia & Co",
+        )
+        custom_fonts = {
+            r.find(f"{w_ns}t").text: r.find(f"{w_ns}rPr/{w_ns}rFonts").attrib.get(f"{w_ns}ascii")
+            for r in doc_custom.iter(f"{w_ns}r")
+            if r.find(f"{w_ns}t") is not None
+            and r.find(f"{w_ns}t").text
+            and r.find(f"{w_ns}rPr/{w_ns}rFonts") is not None
+        }
+        self.assertEqual(custom_fonts.get("manual-cli"), "Consolas")
+        self.assertEqual(custom_fonts.get("Test Manual"), "Georgia & Co")
+
+    def test_docx_typography_sizes_and_caption_style(self):
+        """Verify exact w:sz half-point values across all elements and bold-label/regular-title caption."""
+        import zipfile
+        from build_manual import TYPOGRAPHY, build_docx_stdlib_oxml
+
+        spec = json.loads(json.dumps(self.sample_spec))
+        spec["chapters"][0]["sections"][0]["body"] = (
+            "Run `cli-check` now (See Figure 1.1)."
+        )
+        docx_path = os.path.join(self.tmp_dir, "typography.docx")
+        build_docx_stdlib_oxml(spec, docx_path)
+
+        self.assertEqual(TYPOGRAPHY["subsection"], 24)
+
+        w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        with zipfile.ZipFile(docx_path, "r") as zf:
+            doc_root = ET.fromstring(zf.read("word/document.xml"))
+            styles_root = ET.fromstring(zf.read("word/styles.xml"))
+            ftr_root = ET.fromstring(zf.read("word/footer1.xml"))
+
+        def _find_run_props(target_text):
+            for r in doc_root.iter(f"{w_ns}r"):
+                t = r.find(f"{w_ns}t")
+                if t is not None and t.text == target_text:
+                    rpr = r.find(f"{w_ns}rPr")
+                    sz = rpr.find(f"{w_ns}sz").attrib.get(f"{w_ns}val")
+                    return (
+                        sz,
+                        rpr.find(f"{w_ns}b") is not None,
+                        rpr.find(f"{w_ns}i") is not None,
+                    )
+            self.fail(f"Run with text {target_text!r} not found")
+
+        self.assertEqual(_find_run_props("[ APPLICATION LOGO ]"), ("26", True, False))
+        self.assertEqual(_find_run_props("Test Manual"), ("52", True, False))
+        self.assertEqual(_find_run_props("Automated Test Suite"), ("26", False, False))
+        self.assertEqual(_find_run_props("Version: 1.0.0   |   Last Updated: 2026-11-02"), ("20", False, False))
+        self.assertEqual(_find_run_props("Table of Contents"), ("36", True, False))
+        self.assertEqual(_find_run_props("Chapter 1: Introduction")[0], "22")
+        self.assertEqual(_find_run_props("1.1 First Section")[0], "21")  # TOC section vs body heading below
+
+        # Verify all Chapter 1 / Section 1.1 / Body / Bullet / Code / Caption sizes
+        sz_by_text = {}
+        for p in doc_root.iter(f"{w_ns}p"):
+            for r in p.iter(f"{w_ns}r"):
+                t = r.find(f"{w_ns}t")
+                sz_el = r.find(f"{w_ns}rPr/{w_ns}sz")
+                if t is not None and t.text and sz_el is not None:
+                    sz_by_text.setdefault(t.text, []).append(sz_el.attrib.get(f"{w_ns}val"))
+
+        self.assertIn("36", sz_by_text["Chapter 1: Introduction"])
+        self.assertIn("28", sz_by_text["1.1 First Section"])
+        self.assertEqual(sz_by_text["Welcome to test manual."], ["22"])
+        self.assertEqual(sz_by_text["Run "], ["22"])
+        self.assertEqual(sz_by_text["cli-check"], ["20"])
+        self.assertEqual(sz_by_text["Step 1"], ["22"])
+        self.assertEqual(sz_by_text[": Click the button."], ["22"])
+
+        # Caption split into bold label + regular title at 9.5pt (19 half-pt)
+        self.assertEqual(_find_run_props("Figure 1.1:"), ("19", True, False))
+        self.assertEqual(_find_run_props(" Sample Screenshot"), ("19", False, False))
+
+        # Verify footer and styles.xml sizes + line spacing 288
+        ftr_sz = ftr_root.find(f".//{w_ns}sz").attrib.get(f"{w_ns}val")
+        self.assertEqual(ftr_sz, "18")
+        doc_def_sz = styles_root.find(f".//{w_ns}docDefaults//{w_ns}sz").attrib.get(f"{w_ns}val")
+        self.assertEqual(doc_def_sz, "22")
+
+        style_sizes = {}
+        for st in styles_root.findall(f"{w_ns}style"):
+            sid = st.attrib.get(f"{w_ns}styleId")
+            sz_el = st.find(f"{w_ns}rPr/{w_ns}sz")
+            if sz_el is not None:
+                style_sizes[sid] = sz_el.attrib.get(f"{w_ns}val")
+        self.assertEqual(style_sizes.get("Heading1"), "36")
+        self.assertEqual(style_sizes.get("Heading2"), "28")
+
+        # Line spacing 288 on prose and bullet paragraphs
+        spacings = [
+            sp.attrib.get(f"{w_ns}line")
+            for p in doc_root.iter(f"{w_ns}p")
+            for sp in p.findall(f"{w_ns}pPr/{w_ns}spacing")
+            if p.find(f"{w_ns}pPr/{w_ns}pStyle") is not None
+            and p.find(f"{w_ns}pPr/{w_ns}pStyle").attrib.get(f"{w_ns}val") == "ListBullet"
+        ]
+        self.assertEqual(spacings, ["288"])
+
+    def test_a4_image_dimensions_landscape_portrait_and_logo(self):
+        """Verify _calc_a4_image_dimensions defaults (6.0x4.0), portrait_max_h (5.0), and logo bounds."""
+        import struct
+
+        def _make_png(name, width, height):
+            p = os.path.join(self.tmp_dir, name)
+            head = (
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                + struct.pack(">II", width, height)
+                + b"\x08\x02\x00\x00\x00"
+            )
+            with open(p, "wb") as f:
+                f.write(head + b"\x00" * 64)
+            return p
+
+        land_png = _make_png("land_1440x900.png", 1440, 900)
+        port_png = _make_png("port_390x844.png", 390, 844)
+        logo_port_png = _make_png("logo_200x300.png", 200, 300)
+
+        self.assertEqual(_calc_a4_image_dimensions(land_png), (6.0, 3.75))
+        self.assertEqual(_calc_a4_image_dimensions(port_png, portrait_max_h=5.0), (2.31, 5.0))
+        self.assertEqual(_calc_a4_image_dimensions(logo_port_png, max_w=2.4, max_h=1.2), (0.8, 1.2))
+
+    def test_text_align_option_and_validation(self):
+        """Verify text_align='left' updates DOCX and Markdown, and invalid values fail."""
+        import zipfile
+
+        left_spec = json.loads(json.dumps(self.sample_spec))
+        left_spec["text_align"] = "left"
+        left_spec_p = os.path.join(self.tmp_dir, "left_spec.json")
+        with open(left_spec_p, "w", encoding="utf-8") as f:
+            json.dump(left_spec, f)
+
+        out_dir = os.path.join(self.tmp_dir, "left_out")
+        res = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "build_manual.py"),
+                "--spec",
+                left_spec_p,
+                "--out-dir",
+                out_dir,
+                "--basename",
+                "LeftManual",
+                "--format",
+                "all",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"left build failed: {res.stderr}")
+
+        with open(os.path.join(out_dir, "LeftManual.md"), "r", encoding="utf-8") as f:
+            md_text = f.read()
+        self.assertIn("text-align: left;", md_text)
+        self.assertNotIn("text-align: justify;", md_text)
+
+        with zipfile.ZipFile(os.path.join(out_dir, "LeftManual.docx"), "r") as zf:
+            doc_xml = zf.read("word/document.xml").decode("utf-8")
+        self.assertIn('w:val="left"', doc_xml)
+        self.assertNotIn('w:val="both"', doc_xml)
+
+        bad_spec = json.loads(json.dumps(self.sample_spec))
+        bad_spec["text_align"] = "center"
+        bad_spec_p = os.path.join(self.tmp_dir, "bad_align.json")
+        with open(bad_spec_p, "w", encoding="utf-8") as f:
+            json.dump(bad_spec, f)
+        res_bad = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "build_manual.py"),
+                "--spec",
+                bad_spec_p,
+                "--out-dir",
+                out_dir,
+                "--basename",
+                "BadManual",
+                "--format",
+                "md",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(res_bad.returncode, 0)
+
+    def test_import_md_legacy_and_new_caption_formats(self):
+        """Verify import-md parses both bold-label/regular-title captions and legacy <em><b> captions."""
+        md_sample = os.path.join(self.tmp_dir, "mixed_captions.md")
+        with open(md_sample, "w", encoding="utf-8") as f:
+            f.write(
+                "# Mixed Manual\n\n"
+                "## Chapter 1: Guide\n\n"
+                "### 1.1 Screens\n\n"
+                "Intro (See Figure 1.1) and (See Figure 1.2).\n\n"
+                '<div align="center"><p><b>Figure 1.1:</b> New Format Caption</p></div>\n\n'
+                '<div align="center">\n'
+                '  <img src="assets/final/a.png" alt="Figure 1.2: Legacy Format Caption" /><br/>\n'
+                "  <p><em><b>Figure 1.2: Legacy Format Caption</b></em></p>\n"
+                "</div>\n"
+            )
+        out_spec = os.path.join(self.tmp_dir, "mixed_spec.json")
+        res = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(SCRIPTS_DIR, "manual_state.py"),
+                "import-md",
+                "--input",
+                md_sample,
+                "--spec-out",
+                out_spec,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"import-md failed: {res.stderr}")
+        with open(out_spec, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        figs = data["chapters"][0]["sections"][0]["figures"]
+        self.assertEqual(len(figs), 2)
+        self.assertEqual(figs[0]["id"], "1.1")
+        self.assertEqual(figs[0]["title"], "New Format Caption")
+        self.assertEqual(figs[1]["id"], "1.2")
+        self.assertEqual(figs[1]["title"], "Legacy Format Caption")
+
+    def test_check_env_liberation_sans_warning_not_failure(self):
+        """Verify check_env reports liberation_sans and warns without failing when missing."""
+        from unittest import mock
+        import check_env
+
+        res = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS_DIR, "check_env.py"), "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"check_env --json failed: {res.stderr}")
+        payload = json.loads(res.stdout)
+        self.assertIn("liberation_sans", payload)
+
+        with mock.patch.object(
+            check_env,
+            "check_liberation_sans",
+            return_value={"available": False, "detail": "WARNING: missing"},
+        ):
+            info = check_env.inspect_environment()
+        self.assertFalse(info["liberation_sans"]["available"])
+        self.assertTrue(info["ready_core"])
+        report = check_env.format_text_report(info)
+        self.assertIn("WARNING - NOT FOUND", report)
 
 
 if __name__ == "__main__":

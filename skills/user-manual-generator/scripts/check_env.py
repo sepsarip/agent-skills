@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 from typing import Any, Dict
 
@@ -124,6 +125,37 @@ def check_pdftotext() -> Dict[str, Any]:
     }
 
 
+def check_liberation_sans() -> Dict[str, Any]:
+    fc_list = shutil.which("fc-list")
+    if not fc_list:
+        return {
+            "available": None,
+            "detail": "fc-list not in PATH (font check skipped)",
+        }
+    try:
+        proc = subprocess.run(
+            [fc_list, ":family=Liberation Sans", "family"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        found = proc.returncode == 0 and "liberation sans" in proc.stdout.lower()
+        return {
+            "available": found,
+            "detail": (
+                "Liberation Sans installed (metric-compatible Arial fallback for LibreOffice)"
+                if found
+                else "WARNING: Liberation Sans not found (install fonts-liberation for accurate LibreOffice PDF pagination)"
+            ),
+        }
+    except Exception as err:
+        return {
+            "available": False,
+            "detail": f"WARNING: Liberation Sans check failed ({err})",
+        }
+
+
 def check_venv() -> Dict[str, Any]:
     is_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     cwd = os.getcwd()
@@ -151,6 +183,7 @@ def inspect_environment(profile: str = "all") -> Dict[str, Any]:
     pw_info = check_playwright_chromium()
     so_info = check_soffice()
     pdf_txt_info = check_pdftotext()
+    lib_sans_info = check_liberation_sans()
     venv_info = check_venv()
     pip_info = check_pip()
 
@@ -224,6 +257,7 @@ def inspect_environment(profile: str = "all") -> Dict[str, Any]:
         "playwright_chromium": pw_info,
         "libreoffice": so_info,
         "pdftotext": pdf_txt_info,
+        "liberation_sans": lib_sans_info,
         "virtualenv": venv_info,
         "pip": pip_info,
     }
@@ -274,6 +308,15 @@ def format_text_report(info: Dict[str, Any], profile: str = "all") -> str:
 
     pt = info["pdftotext"]
     lines.append(f"  - pdftotext (poppler): {'AVAILABLE' if pt['available'] else 'NOT FOUND'}")
+
+    ls_font = info["liberation_sans"]
+    if ls_font["available"] is True:
+        ls_status = "AVAILABLE"
+    elif ls_font["available"] is False:
+        ls_status = "WARNING - NOT FOUND (install fonts-liberation for LibreOffice Arial metrics)"
+    else:
+        ls_status = "SKIPPED (fc-list not in PATH)"
+    lines.append(f"  - Liberation Sans Font: {ls_status}")
 
     pip_data = info["pip"]
     lines.append(f"  - Pip Package Manager: {'AVAILABLE' if pip_data['available'] else 'NOT INSTALLED'}")

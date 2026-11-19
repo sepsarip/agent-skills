@@ -4,7 +4,7 @@ description: Generate end-user manual books (user guides / panduan pengguna) for
 license: MIT
 compatibility: Requires Python 3.9+ stdlib for .md and .docx generation; Pillow or PyCairo (cairo) for annotations; playwright or Browser MCP for live captures; LibreOffice + (pypdf or pdftotext) for automated 2-pass PDF page resolution and official PDF export.
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # User Manual Generator
@@ -279,8 +279,8 @@ python3 scripts/annotate_cairo.py \
 ### Output Layout, A4 Paper Standards & Centering Rules
 - **A4 Standard Dimensions & Margins**: Word documents are formatted to standard A4 (210mm x 297mm / 8.27" x 11.69" / `11906 x 16838 dxa`) with 1.0-inch (`1440 dxa`) margins across all 3 sections and 0.5-inch (`720 dxa`) header/footer distance.
 - **Image Bounding, Framing & Anti-Orphan Pagination**:
-  - Chapter screenshots are scaled proportionally (up to 5.4" wide x 3.4" high in DOCX; helper cap 5.8" x 5.2") with a subtle `#CBD5E1` border so white UI cards stand out cleanly and headings + screenshot + caption + bullet points fit together without orphaned trailing lines.
-  - Both the image and the figure caption (*Gambar X.Y: Judul* / *Figure X.Y: Title*) are center-aligned with `keepNext` chains linking section headings, images, captions, and bullets.
+  - Chapter screenshots are scaled proportionally (up to 6.0" wide x 4.0" high in DOCX; up to 5.0" high for portrait screenshots via `portrait_max_h`) with a subtle `#CBD5E1` border so white UI cards stand out cleanly and headings + screenshot + caption + bullet points fit together without orphaned trailing lines.
+  - Both the image and the figure caption (**Gambar X.Y:** Judul / **Figure X.Y:** Title, 9.5pt) are center-aligned with `keepNext` chains linking section headings, images, captions, and bullets.
 - **Format Selection & Native OpenXML Builder**:
   - `--format md`: Generates Markdown only (zero external dependencies).
   - `--format all` / `--format docx`: Always builds a native multi-section ECMA-376 OpenXML `.docx` (`build_docx_stdlib_oxml`) using 100% Python stdlib with embedded `word/media/` images, multi-paragraph `\n\n` breaks, and styled callout blockquotes (`> **Note:** ...`).
@@ -288,7 +288,7 @@ python3 scripts/annotate_cairo.py \
 - **3-Section Pagination Hierarchy**:
   - **Cover Page (Section 1)**: Centered logo or `[ APPLICATION LOGO ]` / `[ LOGO APLIKASI ]` box, wrapped 26pt bold title, subtitle, metadata rule, and **no page number**.
   - **Table of Contents (Section 2)**: Lowercase Roman numerals (`i`, `ii`...), clickable internal hyperlinks, right-aligned dot leaders at `9026 dxa` (6.27"), `360 dxa` subsection indentation, and `PAGEREF` fields.
-  - **Main Chapters (Section 3)**: Arabic numerals starting at `1`, chapter page breaks, justified paragraphs and bullets, and native bold/italic/code runs.
+  - **Main Chapters (Section 3)**: Arabic numerals starting at `1`, chapter page breaks, configurable `text_align` (`justify` default, `left` optional), `Arial`/`Courier New` default typography (`font_family`/`code_font_family` optional), 11pt body/bullets, and native bold/italic/code runs.
 - **Non-Destructive Archiving**: Previous outputs are automatically archived to `<out_dir>/archive/<basename>_<timestamp>/` before rebuilding.
 
 ### Standard Directory Structure (`docs/manual_book/`)

@@ -16,8 +16,69 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple
+
+
+DEFAULT_FONT_FAMILY = "Arial"
+DEFAULT_CODE_FONT_FAMILY = "Courier New"
+DEFAULT_TEXT_ALIGN = "justify"
+
+MAX_IMG_W = 6.0
+MAX_IMG_H = 4.0
+PORTRAIT_MAX_H = 5.0
+LOGO_MAX_W = 2.4
+LOGO_MAX_H = 1.2
+
+# Exact OOXML half-point sizes (w:sz = pt * 2, integer; no rounding)
+TYPOGRAPHY: Dict[str, int] = {
+    "cover_title": 52,       # 26 pt, bold
+    "cover_subtitle": 26,    # 13 pt
+    "cover_meta": 20,        # 10 pt
+    "logo_placeholder": 26,  # 13 pt, bold
+    "toc_title": 36,         # 18 pt, bold
+    "toc_chapter": 22,       # 11 pt, bold
+    "toc_section": 21,       # 10.5 pt
+    "chapter": 36,           # 18 pt, bold
+    "section": 28,           # 14 pt, bold
+    "subsection": 24,        # 12 pt, bold (reserved constant)
+    "body": 22,              # 11 pt
+    "bullet": 22,            # 11 pt
+    "caption": 19,           # 9.5 pt
+    "code": 20,              # 10 pt
+    "footer": 18,            # 9 pt
+}
+BODY_LINE_SPACING = "288"  # 1.2x in OOXML auto spacing (240 * 1.2)
+
+
+def _resolve_text_align(spec: Dict[str, Any]) -> str:
+    raw = spec.get("text_align")
+    val = (str(raw) if raw is not None else DEFAULT_TEXT_ALIGN).strip().lower() or DEFAULT_TEXT_ALIGN
+    if val not in ("justify", "left"):
+        raise ValueError(f"Invalid text_align {raw!r}: expected 'justify' or 'left'.")
+    return val
+
+
+def _resolve_font_families(spec: Dict[str, Any]) -> Tuple[str, str]:
+    font_raw = spec.get("font_family")
+    code_raw = spec.get("code_font_family")
+    font_family = str(font_raw).strip() if font_raw is not None else ""
+    code_font_family = str(code_raw).strip() if code_raw is not None else ""
+    return (
+        font_family or DEFAULT_FONT_FAMILY,
+        code_font_family or DEFAULT_CODE_FONT_FAMILY,
+    )
+
+
+def _resolve_portrait_max_h(spec: Dict[str, Any]) -> float:
+    raw = spec.get("portrait_max_h", PORTRAIT_MAX_H)
+    if raw is None:
+        return PORTRAIT_MAX_H
+    val = float(raw)
+    if val <= 0:
+        raise ValueError(f"Invalid portrait_max_h {raw!r}: must be > 0.")
+    return val
 
 
 def validate_workspace_path(target_path: str, must_exist: bool = False) -> str:
@@ -143,11 +204,15 @@ def build_markdown(
     - Chapters: Numbered footers (*X*), explicit HTML anchors for guaranteed navigation.
     """
     labels = get_labels(spec.get("language", "en"))
+    text_align = _resolve_text_align(spec)
     chapters = spec.get("chapters", [])
     lines: List[str] = []
 
-    # Styling for justified text alignment
-    lines.append('<style>\np, li { text-align: justify; text-justify: inter-word; }\n</style>\n')
+    # Styling for body and list alignment
+    if text_align == "justify":
+        lines.append('<style>\np, li { text-align: justify; text-justify: inter-word; }\n</style>\n')
+    else:
+        lines.append('<style>\np, li { text-align: left; }\n</style>\n')
 
     # Cover Page: Logo or Placeholder
     logo_path = spec.get("logo_path")
@@ -241,17 +306,23 @@ def build_markdown(
                 else:
                     rel_img = ""
 
-                caption = f"{labels['figure']} {fig_id}: {fig_title}"
+                caption_label = f"{labels['figure']} {fig_id}:"
+                caption = f"{caption_label} {fig_title}" if fig_title else caption_label
+                caption_html = (
+                    f"<b>{caption_label}</b> {fig_title}"
+                    if fig_title
+                    else f"<b>{caption_label}</b>"
+                )
                 lines.append(f'<a id="{fig_anchor}"></a>')
                 if rel_img:
                     lines.append('<div align="center">')
                     lines.append(
                         f'  <img src="{rel_img}" alt="{caption}" style="max-width: 100%; max-height: 460px; height: auto; border: 1px solid #cbd5e1; border-radius: 4px;" /><br/>'
                     )
-                    lines.append(f'  <p><em><b>{caption}</b></em></p>')
+                    lines.append(f'  <p>{caption_html}</p>')
                     lines.append('</div>\n')
                 else:
-                    lines.append(f'<div align="center"><p><em><b>{caption}</b></em></p></div>\n')
+                    lines.append(f'<div align="center"><p>{caption_html}</p></div>\n')
 
                 for bullet in fig.get("bullets", []):
                     lines.append(f"- {normalize_prose_arrows(bullet)}")
@@ -362,8 +433,9 @@ def _read_image_pixel_size(img_path: str) -> Tuple[int, int]:
 
 def _calc_a4_image_dimensions(
     img_path: str,
-    max_w: float = 5.8,
-    max_h: float = 5.2,
+    max_w: float = MAX_IMG_W,
+    max_h: float = MAX_IMG_H,
+    portrait_max_h: Optional[float] = None,
 ) -> Tuple[float, float]:
     """Calculate scaled width and height in inches to prevent A4 paper overflow."""
     orig_w, orig_h = _read_image_pixel_size(img_path)
@@ -372,14 +444,15 @@ def _calc_a4_image_dimensions(
         return max_w, max_h
 
     aspect = orig_w / orig_h
-    max_aspect = max_w / max_h
+    eff_max_h = portrait_max_h if (portrait_max_h is not None and aspect < 1.0) else max_h
+    max_aspect = max_w / eff_max_h
 
     if aspect >= max_aspect:
         w = max_w
         h = max_w / aspect
     else:
-        h = max_h
-        w = max_h * aspect
+        h = eff_max_h
+        w = eff_max_h * aspect
 
     return round(w, 3), round(h, 3)
 
@@ -717,13 +790,15 @@ def _oxml_add_run(
     bold: bool = False,
     italic: bool = False,
     code: bool = False,
-    sz_half_pt: int = 21,
+    sz_half_pt: int = TYPOGRAPHY["body"],
     color_hex: str = "0F172A",
+    font_family: str = DEFAULT_FONT_FAMILY,
+    code_font_family: str = DEFAULT_CODE_FONT_FAMILY,
 ) -> ET.Element:
     r_el = ET.SubElement(p_el, _w("r"))
     r_pr = ET.SubElement(r_el, _w("rPr"))
     r_fonts = ET.SubElement(r_pr, _w("rFonts"))
-    font_name = "DejaVu Sans Mono" if code else "DejaVu Sans"
+    font_name = code_font_family if code else font_family
     r_fonts.set(_w("ascii"), font_name)
     r_fonts.set(_w("hAnsi"), font_name)
     r_fonts.set(_w("cs"), font_name)
@@ -746,8 +821,10 @@ def _oxml_add_run(
 def _oxml_add_markdown_runs(
     p_el: ET.Element,
     text: str,
-    sz_half_pt: int = 21,
+    sz_half_pt: int = TYPOGRAPHY["body"],
     color_hex: str = "0F172A",
+    font_family: str = DEFAULT_FONT_FAMILY,
+    code_font_family: str = DEFAULT_CODE_FONT_FAMILY,
 ) -> None:
     for seg, is_bold, is_italic, is_code in _tokenize_inline_markdown(text):
         _oxml_add_run(
@@ -756,8 +833,10 @@ def _oxml_add_markdown_runs(
             bold=is_bold,
             italic=is_italic,
             code=is_code,
-            sz_half_pt=19 if is_code else sz_half_pt,
+            sz_half_pt=TYPOGRAPHY["code"] if is_code else sz_half_pt,
             color_hex="1E293B" if is_code else color_hex,
+            font_family=font_family,
+            code_font_family=code_font_family,
         )
 
 
@@ -837,8 +916,12 @@ def _oxml_append_prose_paragraphs(
     before_dxa: str = "0",
     after_dxa: str = "100",
     keep_last_with_next: bool = False,
+    font_family: str = DEFAULT_FONT_FAMILY,
+    code_font_family: str = DEFAULT_CODE_FONT_FAMILY,
+    text_align: str = DEFAULT_TEXT_ALIGN,
 ) -> None:
-    """Split prose on blank lines into justified paragraphs and styled callout blockquotes."""
+    """Split prose on blank lines into aligned paragraphs and styled callout blockquotes."""
+    jc_val = "both" if text_align == "justify" else "left"
     blocks = [b.strip() for b in re.split(r"\n\s*\n", str(text).strip()) if b.strip()]
     for idx, block in enumerate(blocks):
         is_last = idx == len(blocks) - 1
@@ -865,22 +948,28 @@ def _oxml_append_prose_paragraphs(
             {
                 _w("before"): "60" if is_callout else before_dxa,
                 _w("after"): after_dxa,
-                _w("line"): "288",
+                _w("line"): BODY_LINE_SPACING,
                 _w("lineRule"): "auto",
             },
         )
         if is_callout:
             ET.SubElement(p_pr, _w("ind"), {_w("left"): "240", _w("right"): "240"})
-        ET.SubElement(p_pr, _w("jc"), {_w("val"): "both"})
+        ET.SubElement(p_pr, _w("jc"), {_w("val"): jc_val})
         clean_block = (
             re.sub(r"^\s*>\s?", "", block, flags=re.MULTILINE).replace("\n", " ").strip()
             if is_callout
             else block.replace("\n", " ")
         )
-        _oxml_add_markdown_runs(p_el, clean_block, sz_half_pt=21)
+        _oxml_add_markdown_runs(
+            p_el,
+            clean_block,
+            sz_half_pt=TYPOGRAPHY["body"],
+            font_family=font_family,
+            code_font_family=code_font_family,
+        )
 
 
-def _oxml_footer_bytes() -> bytes:
+def _oxml_footer_bytes(font_family: str = DEFAULT_FONT_FAMILY) -> bytes:
     ftr = ET.Element(_w("ftr"))
     p = ET.SubElement(ftr, _w("p"))
     p_pr = ET.SubElement(p, _w("pPr"))
@@ -888,7 +977,13 @@ def _oxml_footer_bytes() -> bytes:
     jc.set(_w("val"), "right")
     fld = ET.SubElement(p, _w("fldSimple"))
     fld.set(_w("instr"), "PAGE")
-    _oxml_add_run(fld, "1", sz_half_pt=18, color_hex="64748B")
+    _oxml_add_run(
+        fld,
+        "1",
+        sz_half_pt=TYPOGRAPHY["footer"],
+        color_hex="64748B",
+        font_family=font_family,
+    )
     return ET.tostring(ftr, encoding="utf-8", xml_declaration=True)
 
 
@@ -911,6 +1006,10 @@ def build_docx_stdlib_oxml(
         and embedded media with subtle borders.
     """
     labels = get_labels(spec.get("language", "en"))
+    font_family, code_font_family = _resolve_font_families(spec)
+    text_align = _resolve_text_align(spec)
+    jc_val = "both" if text_align == "justify" else "left"
+    portrait_max_h = _resolve_portrait_max_h(spec)
     chapters = spec.get("chapters", [])
     page_map = page_map or {}
 
@@ -942,7 +1041,7 @@ def build_docx_stdlib_oxml(
             real_logo = resolve_spec_asset_path(
                 logo_path, spec_dir=spec_dir, out_dir=out_dir, must_exist=True
             )
-            lw, lh = _calc_a4_image_dimensions(real_logo, max_w=2.4, max_h=1.2)
+            lw, lh = _calc_a4_image_dimensions(real_logo, max_w=LOGO_MAX_W, max_h=LOGO_MAX_H)
             r_id_logo = _register_image(real_logo)
             p_logo = ET.SubElement(body, _w("p"))
             p_pr = ET.SubElement(p_logo, _w("pPr"))
@@ -985,7 +1084,13 @@ def build_docx_stdlib_oxml(
         ET.SubElement(p_box_pr, _w("jc"), {_w("val"): "center"})
         ET.SubElement(p_box_pr, _w("spacing"), {_w("before"): "0", _w("after"): "0"})
         _oxml_add_run(
-            p_box, labels["logo_placeholder"], bold=True, sz_half_pt=26, color_hex="64748B"
+            p_box,
+            labels["logo_placeholder"],
+            bold=True,
+            sz_half_pt=TYPOGRAPHY["logo_placeholder"],
+            color_hex="64748B",
+            font_family=font_family,
+            code_font_family=code_font_family,
         )
 
     p_title = ET.SubElement(body, _w("p"))
@@ -1000,8 +1105,10 @@ def build_docx_stdlib_oxml(
         p_title,
         str(spec.get("title", labels["default_title"])),
         bold=True,
-        sz_half_pt=52,
+        sz_half_pt=TYPOGRAPHY["cover_title"],
         color_hex="0F172A",
+        font_family=font_family,
+        code_font_family=code_font_family,
     )
 
     if spec.get("subtitle"):
@@ -1011,9 +1118,16 @@ def build_docx_stdlib_oxml(
         ET.SubElement(
             ps_pr,
             _w("spacing"),
-            {_w("before"): "0", _w("after"): "360", _w("line"): "288", _w("lineRule"): "auto"},
+            {_w("before"): "0", _w("after"): "360", _w("line"): BODY_LINE_SPACING, _w("lineRule"): "auto"},
         )
-        _oxml_add_run(p_sub, str(spec["subtitle"]), sz_half_pt=26, color_hex="475569")
+        _oxml_add_run(
+            p_sub,
+            str(spec["subtitle"]),
+            sz_half_pt=TYPOGRAPHY["cover_subtitle"],
+            color_hex="475569",
+            font_family=font_family,
+            code_font_family=code_font_family,
+        )
 
     meta_parts = []
     if spec.get("version"):
@@ -1031,7 +1145,14 @@ def build_docx_stdlib_oxml(
             {_w("val"): "single", _w("sz"): "6", _w("space"): "12", _w("color"): "CBD5E1"},
         )
         ET.SubElement(pm_pr, _w("spacing"), {_w("before"): "2800", _w("after"): "120"})
-        _oxml_add_run(p_meta, "   |   ".join(meta_parts), sz_half_pt=20, color_hex="64748B")
+        _oxml_add_run(
+            p_meta,
+            "   |   ".join(meta_parts),
+            sz_half_pt=TYPOGRAPHY["cover_meta"],
+            color_hex="64748B",
+            font_family=font_family,
+            code_font_family=code_font_family,
+        )
 
     # End of Section 1 (Cover Page -> No Footer)
     p_sec1_end = ET.SubElement(body, _w("p"))
@@ -1051,7 +1172,15 @@ def build_docx_stdlib_oxml(
         {_w("val"): "single", _w("sz"): "8", _w("space"): "6", _w("color"): "CBD5E1"},
     )
     ET.SubElement(pth_pr, _w("spacing"), {_w("before"): "120", _w("after"): "240"})
-    _oxml_add_run(p_toc_h, labels["toc"], bold=True, sz_half_pt=36, color_hex="0F172A")
+    _oxml_add_run(
+        p_toc_h,
+        labels["toc"],
+        bold=True,
+        sz_half_pt=TYPOGRAPHY["toc_title"],
+        color_hex="0F172A",
+        font_family=font_family,
+        code_font_family=code_font_family,
+    )
 
     def _append_toc_line(
         bm_name: str,
@@ -1059,6 +1188,7 @@ def build_docx_stdlib_oxml(
         pg_str: str,
         is_chapter: bool,
     ) -> None:
+        toc_sz = TYPOGRAPHY["toc_chapter"] if is_chapter else TYPOGRAPHY["toc_section"]
         p_line = ET.SubElement(body, _w("p"))
         pl_pr = ET.SubElement(p_line, _w("pPr"))
         if not is_chapter:
@@ -1088,8 +1218,10 @@ def build_docx_stdlib_oxml(
             hl,
             label_str,
             bold=is_chapter,
-            sz_half_pt=21 if is_chapter else 20,
+            sz_half_pt=toc_sz,
             color_hex="0F172A" if is_chapter else "334155",
+            font_family=font_family,
+            code_font_family=code_font_family,
         )
         r_tab = ET.SubElement(hl, _w("r"))
         ET.SubElement(r_tab, _w("tab"))
@@ -1106,8 +1238,10 @@ def build_docx_stdlib_oxml(
             hl,
             str(pg_str),
             bold=is_chapter,
-            sz_half_pt=21 if is_chapter else 20,
+            sz_half_pt=toc_sz,
             color_hex="0F172A" if is_chapter else "475569",
+            font_family=font_family,
+            code_font_family=code_font_family,
         )
         r_end = ET.SubElement(hl, _w("r"))
         ET.SubElement(r_end, _w("fldChar"), {_w("fldCharType"): "end"})
@@ -1165,15 +1299,23 @@ def build_docx_stdlib_oxml(
             p_ch,
             f"{labels['chapter']} {ch_num}: {ch_title}",
             bold=True,
-            sz_half_pt=34,
+            sz_half_pt=TYPOGRAPHY["chapter"],
             color_hex="0F172A",
+            font_family=font_family,
+            code_font_family=code_font_family,
         )
         next_bm_id += 1
         _oxml_wrap_bookmark(p_ch, next_bm_id, ch_bm)
 
         if ch.get("intro"):
             _oxml_append_prose_paragraphs(
-                body, str(ch["intro"]), before_dxa="40", after_dxa="120"
+                body,
+                str(ch["intro"]),
+                before_dxa="40",
+                after_dxa="120",
+                font_family=font_family,
+                code_font_family=code_font_family,
+                text_align=text_align,
             )
 
         ch_fig_counter = 0
@@ -1195,15 +1337,24 @@ def build_docx_stdlib_oxml(
                 p_sec,
                 f"{sec_num} {sec_title}",
                 bold=True,
-                sz_half_pt=26,
+                sz_half_pt=TYPOGRAPHY["section"],
                 color_hex="1E293B",
+                font_family=font_family,
+                code_font_family=code_font_family,
             )
             next_bm_id += 1
             _oxml_wrap_bookmark(p_sec, next_bm_id, sec_bm)
 
             if body_text:
                 _oxml_append_prose_paragraphs(
-                    body, body_text, before_dxa="0", after_dxa="100", keep_last_with_next=bool(figures)
+                    body,
+                    body_text,
+                    before_dxa="0",
+                    after_dxa="100",
+                    keep_last_with_next=bool(figures),
+                    font_family=font_family,
+                    code_font_family=code_font_family,
+                    text_align=text_align,
                 )
 
             for fig in figures:
@@ -1212,14 +1363,20 @@ def build_docx_stdlib_oxml(
                 fig_title = str(fig.get("title", ""))
                 fig_slug = re.sub(r"[^\w]", "", str(fig_id))
                 fig_bm = f"umgFig{fig_slug}"
-                caption_str = f"{labels['figure']} {fig_id}: {fig_title}"
+                caption_label = f"{labels['figure']} {fig_id}:"
+                caption_str = f"{caption_label} {fig_title}" if fig_title else caption_label
 
                 img_path = fig.get("image_path", "")
                 if img_path:
                     real_img = resolve_spec_asset_path(
                         img_path, spec_dir=spec_dir, out_dir=out_dir, must_exist=True
                     )
-                    iw, ih = _calc_a4_image_dimensions(real_img, max_w=5.4, max_h=3.4)
+                    iw, ih = _calc_a4_image_dimensions(
+                        real_img,
+                        max_w=MAX_IMG_W,
+                        max_h=MAX_IMG_H,
+                        portrait_max_h=portrait_max_h,
+                    )
                     r_id_img = _register_image(real_img)
                     p_img = ET.SubElement(body, _w("p"))
                     pimg_pr = ET.SubElement(p_img, _w("pPr"))
@@ -1244,8 +1401,26 @@ def build_docx_stdlib_oxml(
                     ET.SubElement(pcap_pr, _w("keepNext"))
                 ET.SubElement(pcap_pr, _w("spacing"), {_w("before"): "20", _w("after"): "90"})
                 _oxml_add_run(
-                    p_cap, caption_str, bold=True, italic=True, sz_half_pt=20, color_hex="334155"
+                    p_cap,
+                    caption_label,
+                    bold=True,
+                    italic=False,
+                    sz_half_pt=TYPOGRAPHY["caption"],
+                    color_hex="334155",
+                    font_family=font_family,
+                    code_font_family=code_font_family,
                 )
+                if fig_title:
+                    _oxml_add_run(
+                        p_cap,
+                        f" {fig_title}",
+                        bold=False,
+                        italic=False,
+                        sz_half_pt=TYPOGRAPHY["caption"],
+                        color_hex="334155",
+                        font_family=font_family,
+                        code_font_family=code_font_family,
+                    )
                 next_bm_id += 1
                 _oxml_wrap_bookmark(p_cap, next_bm_id, fig_bm)
 
@@ -1257,18 +1432,24 @@ def build_docx_stdlib_oxml(
                     ET.SubElement(num_pr, _w("ilvl"), {_w("val"): "0"})
                     ET.SubElement(num_pr, _w("numId"), {_w("val"): "1"})
                     ET.SubElement(pbul_pr, _w("keepLines"))
-                    ET.SubElement(pbul_pr, _w("jc"), {_w("val"): "both"})
+                    ET.SubElement(pbul_pr, _w("jc"), {_w("val"): jc_val})
                     ET.SubElement(
                         pbul_pr,
                         _w("spacing"),
                         {
                             _w("before"): "20",
                             _w("after"): "60",
-                            _w("line"): "280",
+                            _w("line"): BODY_LINE_SPACING,
                             _w("lineRule"): "auto",
                         },
                     )
-                    _oxml_add_markdown_runs(p_bul, str(b_item), sz_half_pt=21)
+                    _oxml_add_markdown_runs(
+                        p_bul,
+                        str(b_item),
+                        sz_half_pt=TYPOGRAPHY["bullet"],
+                        font_family=font_family,
+                        code_font_family=code_font_family,
+                    )
 
     # Body-level sectPr for Section 3 (Main Content -> Arabic '1')
     body.append(
@@ -1281,23 +1462,26 @@ def build_docx_stdlib_oxml(
     )
 
     # Assemble OpenXML package parts
+    esc_font = xml_escape(font_family, {'"': "&quot;"})
     styles_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         f'<w:styles xmlns:w="{W_NS}">'
         '<w:docDefaults>'
         '<w:rPrDefault><w:rPr>'
-        '<w:rFonts w:ascii="DejaVu Sans" w:hAnsi="DejaVu Sans" w:cs="DejaVu Sans"/>'
-        '<w:sz w:val="21"/><w:szCs w:val="21"/><w:color w:val="0F172A"/>'
+        f'<w:rFonts w:ascii="{esc_font}" w:hAnsi="{esc_font}" w:cs="{esc_font}"/>'
+        f'<w:sz w:val="{TYPOGRAPHY["body"]}"/><w:szCs w:val="{TYPOGRAPHY["body"]}"/><w:color w:val="0F172A"/>'
         '</w:rPr></w:rPrDefault>'
         '</w:docDefaults>'
         '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
         '<w:name w:val="Normal"/></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading1">'
         '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>'
-        '<w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>'
+        '<w:pPr><w:outlineLvl w:val="0"/></w:pPr>'
+        f'<w:rPr><w:b/><w:sz w:val="{TYPOGRAPHY["chapter"]}"/><w:szCs w:val="{TYPOGRAPHY["chapter"]}"/></w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading2">'
         '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>'
-        '<w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>'
+        '<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'
+        f'<w:rPr><w:b/><w:sz w:val="{TYPOGRAPHY["section"]}"/><w:szCs w:val="{TYPOGRAPHY["section"]}"/></w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="ListBullet">'
         '<w:name w:val="List Bullet"/><w:basedOn w:val="Normal"/></w:style>'
         '</w:styles>'
@@ -1314,7 +1498,7 @@ def build_docx_stdlib_oxml(
         '<w:lvlText w:val="\u2022"/>'
         '<w:lvlJc w:val="left"/>'
         '<w:pPr><w:ind w:left="420" w:hanging="220"/></w:pPr>'
-        '<w:rPr><w:rFonts w:ascii="DejaVu Sans" w:hAnsi="DejaVu Sans"/></w:rPr>'
+        f'<w:rPr><w:rFonts w:ascii="{esc_font}" w:hAnsi="{esc_font}" w:cs="{esc_font}"/></w:rPr>'
         '</w:lvl>'
         '</w:abstractNum>'
         '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
@@ -1370,7 +1554,7 @@ def build_docx_stdlib_oxml(
         '</Types>'
     )
 
-    footer_bytes = _oxml_footer_bytes()
+    footer_bytes = _oxml_footer_bytes(font_family=font_family)
     doc_bytes = ET.tostring(doc_el, encoding="utf-8", xml_declaration=True)
 
     parent_dir = os.path.dirname(os.path.abspath(docx_path))

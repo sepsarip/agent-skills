@@ -30,8 +30,21 @@ Never use developer, database, or network architecture terms in the manual book 
 - **UI Elements**: Wrap exact interface labels, button names, menus, and field names in **Bold** (for example: Click the **Save** button, then select **Download Report**).
 - **Cross-Language Exact On-Screen UI Labels**: When the manual is written in a language different from the application's UI (for example, a Bahasa Indonesia manual for an English UI), always preserve the exact on-screen label in **Bold** alongside the localized meaning so users can locate it immediately (for example: `Klik tombol **Save** (Simpan)` or `**3. Tombol Masuk (Log in)**: Klik tombol **Log in** untuk membuka Dasbor Utama.`).
 - **No Raw ASCII Arrows**: Never write raw ASCII arrows (`->` or `-->`) in prose or bullet points. Write natural sentences (`Click **Save** to store your changes.`) or use a clean typographic arrow (`→`) only for menu trails (`**Settings** → **Appearance**`).
-- **Paragraph & Bullet Alignment**: All body text paragraphs and step-by-step bullet points must be **Justified**.
+- **Paragraph & Bullet Alignment**: Body paragraphs and bullet points default to **Justified** (`"text_align": "justify"`). Set `"text_align": "left"` in `manual_spec.json` for left-aligned (ragged-right) prose and bullets.
 - **Punctuation**: Do not use em-dashes (`—`) or en-dashes (`–`). Use commas, colons, periods, or parentheses.
+
+### Text Styling Conventions
+- **Bold (`**text**`)**: Use for on-screen UI elements that the user clicks or fills in (buttons, menus, tabs, input fields).
+- **Italic (`*text*`)**: Use for new terms on first introduction and placeholder values that the user must replace.
+- **Underline**: Avoid underline in prose; reserve underline strictly for real hyperlinks (Table of Contents entries and cross-references).
+- **Strikethrough**: Avoid strikethrough in prose; reserve it strictly for revision history if any.
+- **Headings**: Do not apply extra inline styling inside chapter or section headings.
+- **Dashes**: Do not add em-dashes (`—`) or en-dashes (`–`).
+
+### Typography & Font Selection
+- **Default Fonts**: `Arial` for body/headings and `Courier New` for inline code (overridable via `font_family` and `code_font_family` in `manual_spec.json`).
+  - **Why `Arial` / `Courier New`**: Microsoft Word renders native Arial and Courier New; LibreOffice automatically maps Arial to bundled metric-compatible `Liberation Sans` (`Liberation Mono` for Courier New), keeping PDF pagination aligned; Apache OpenOffice maps to Croscore `Arimo` (verify manually). `Calibri` is avoided because `Carlito` bundling is unverified for OpenOffice.
+- **Size Hierarchy**: Cover title `26pt` bold, subtitle `13pt`, metadata `10pt`; TOC title `18pt` bold, TOC chapter `11pt` bold, TOC section `10.5pt`; Chapter `18pt` bold, Section `14pt` bold, Subsection constant `12pt` bold; Body & bullets `11pt` (`1.2x` line spacing); Figure captions `9.5pt` centered (`bold` label + regular title); Inline code `10pt`; Footer `9pt`.
 
 ---
 
@@ -43,9 +56,9 @@ Every screenshot must be anchored to the text through a strict citation and capt
    - *English Default*: `To access your workspace, open the authentication page and enter your registered credentials (See Figure 1.1).`
    - *Bahasa Indonesia*: `Untuk masuk ke dalam sistem, buka halaman utama dan masukkan data akun yang telah terdaftar (Lihat Gambar 1.1).`
 2. **Figure Caption & Alignment**: Place the numbered caption immediately below the screenshot using the format `Figure <ChapterNumber>.<SequenceNumber>: <Short Description>` (or `Gambar <NomorBab>.<NomorUrut>: <Deskripsi Singkat>` in Indonesian).
-   - *English Default*: `Figure 1.1: User Authentication and Login Screen`
-   - *Bahasa Indonesia*: `Gambar 1.1: Halaman Login dan Autentikasi Pengguna`
-   - **Alignment & Sizing**: Both the image and the figure caption must be center-aligned (`align center`). Images are scaled to fit comfortably within standard A4 paper margins (maximum 5.8 inches wide and 5.2 inches high) so they never overflow paper boundaries or push captions onto orphaned pages.
+   - *English Default*: `**Figure 1.1:** User Authentication and Login Screen`
+   - *Bahasa Indonesia*: `**Gambar 1.1:** Halaman Login dan Autentikasi Pengguna`
+   - **Alignment & Sizing**: Both the image and the figure caption must be center-aligned (`align center`). Landscape chapter images are scaled proportionally to fit within standard A4 paper margins (maximum 6.0 inches wide and 4.0 inches high). Portrait screenshots (aspect ratio `< 1`) use `portrait_max_h` (default `5.0` inches). If a tall portrait screenshot's `keepNext` chain exceeds remaining page space, Word/LibreOffice moves the block to the next page cleanly without extra pagination overrides; keep accompanying bullets concise or lower `portrait_max_h` if tighter flow is preferred.
 
 ---
 
@@ -56,7 +69,7 @@ Immediately following each figure caption, explain the screen elements or step-b
 - **Limit**: 2 to 5 bullet points per screenshot. If a workflow has more than 5 steps, split it into two screenshots so visual arrows do not clutter the screen.
 - **Structure per Bullet**: `**[Arrow Number / On-Screen Element Name]**: [Concise action instruction and expected outcome in natural prose].`
 - **Logical Callout Order**: Number badges sequentially from top-to-bottom (and left-to-right within the same row) matching the user's reading and action order.
-- **Text Alignment**: All bullet points are styled as **Justified**.
+- **Text Alignment**: Bullet points default to **Justified** (`"text_align": "justify"`), or **Left** when `"text_align": "left"` is set.
 - **Avoid Text Occlusion**:
   - Never place arrowhead tips or callout badges directly over button text, input labels, or instructions.
   - Arrows point to the border or corner of the target element.
@@ -84,7 +97,7 @@ Immediately following each figure caption, explain the screen elements or step-b
   - Numbered using Arabic numerals starting at `1` (`1`, `2`, `3`...).
   - **Chapter 1** always starts on a fresh page immediately after the Table of Contents.
   - Each subsequent Chapter begins on a new page.
-  - Paragraphs and bullet points are formatted as **Justified**.
+  - Paragraphs and bullet points default to **Justified** (`"text_align": "justify"`, or `"left"` when configured).
   - Bold text (`**text**`) is rendered as true native bold formatting in Word documents and PDFs.
 
 ### Page Margins, Header, & Footer Standards
@@ -96,13 +109,13 @@ Immediately following each figure caption, explain the screen elements or step-b
   - Cover page: No footer.
   - Front matter (TOC): Lowercase Roman numerals (`i`, `ii`...).
   - Main chapters: Arabic numerals (`1`, `2`, `3`...).
-- **Strict Content Boundary Rules**: Content must strictly stay within the 1.0-inch margins. TOC dot-leader tab stops align at the printable margin boundary (9029 dxa / 6.27 inches for A4) and images are constrained to a maximum of 5.8 inches wide and 5.2 inches high so no elements overflow.
+- **Strict Content Boundary Rules**: Content must strictly stay within the 1.0-inch margins. TOC dot-leader tab stops align at the printable margin boundary (9026 dxa / 6.27 inches for A4) and chapter images are constrained to a maximum of 6.0 inches wide and 4.0 inches high (`portrait_max_h` default `5.0` inches for portrait screenshots) so no elements overflow.
 
 ---
 
 ## 5. JSON Specification Schema (`manual_spec.json`)
 
-Pass a JSON file with this exact structure to `scripts/build_manual.py`:
+Pass a JSON file with this exact structure to `scripts/build_manual.py` (optional top-level typography/layout keys: `"font_family"` default `"Arial"`, `"code_font_family"` default `"Courier New"`, `"text_align"` `"justify"` or `"left"`, and `"portrait_max_h"` default `5.0`):
 
 ```json
 {
